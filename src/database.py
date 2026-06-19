@@ -212,7 +212,7 @@ def _migrate(conn):
 
 
 def insert_release(version: str, risk_level: str, description: str,
-                   submitter: str, stable_version: Optional[str],
+                   submitter: str, stable_version: Optional[str] = None,
                    emergency_urgent: bool = False,
                    governance_bypassed: Optional[List[Dict]] = None,
                    target_center_ids: Optional[List[str]] = None,

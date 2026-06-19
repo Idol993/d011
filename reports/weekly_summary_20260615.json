@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-06-19T10:45:57",
+  "generated_at": "2026-06-19T11:04:42",
   "week_range": {
     "start": "2026-06-15T00:00:00",
     "end": "2026-06-21T23:59:59"
@@ -195,39 +195,39 @@
   "releases": [
     {
       "release_id": 3,
-      "version": "v9.9.9-emergency-bypass",
+      "version": "v9.9.9-demo-emergency",
       "risk_level": "emergency",
       "status": "pending",
       "status_cn": "待检查",
-      "submitter": "测试员",
+      "submitter": "紧急值班",
       "rollback_triggered": false,
       "emergency_urgent": true,
-      "created_at": "2026-06-19T10:45:56",
-      "updated_at": "2026-06-19T10:45:56"
+      "created_at": "2026-06-19T11:04:19",
+      "updated_at": "2026-06-19T11:04:19"
     },
     {
       "release_id": 2,
-      "version": "v4.0.0-stable",
-      "risk_level": "normal",
-      "status": "released",
-      "status_cn": "已发布",
-      "submitter": "测试员",
-      "rollback_triggered": false,
-      "emergency_urgent": false,
-      "created_at": "2026-06-19T10:45:56",
-      "updated_at": "2026-06-19T10:45:56"
-    },
-    {
-      "release_id": 1,
-      "version": "v5.0.0-A",
+      "version": "v6.1.0-dc01",
       "risk_level": "normal",
       "status": "grayscale",
       "status_cn": "灰度发布中",
-      "submitter": "测试员",
+      "submitter": "开发A",
       "rollback_triggered": false,
       "emergency_urgent": false,
-      "created_at": "2026-06-19T10:45:56",
-      "updated_at": "2026-06-19T10:45:56"
+      "created_at": "2026-06-19T11:04:19",
+      "updated_at": "2026-06-19T11:04:19"
+    },
+    {
+      "release_id": 1,
+      "version": "v6.0.0-stable",
+      "risk_level": "normal",
+      "status": "released",
+      "status_cn": "已发布",
+      "submitter": "发布管理员",
+      "rollback_triggered": false,
+      "emergency_urgent": false,
+      "created_at": "2026-06-19T11:04:19",
+      "updated_at": "2026-06-19T11:04:19"
     }
   ]
 }
