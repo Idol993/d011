@@ -61,7 +61,8 @@ try:
 except Exception:
     Workbook = None
 
-from .config import REPORTS_DIR, RELEASE_STATUS_LABELS, SUCCESS_STATUSES
+from .config import (REPORTS_DIR, RELEASE_STATUS_LABELS, SUCCESS_STATUSES,
+                     FAILED_STATUSES, DISTRIBUTION_CENTERS)
 from .logger import get_logger
 from . import database as db
 from . import notifier
@@ -370,6 +371,150 @@ def _make_json_summary(stats: Dict, out_path: str) -> Optional[str]:
         return out_path
     except Exception as e:
         logger.error(f"生成 JSON 汇总失败: {e}")
+        return None
+
+
+def _make_center_dashboard(out_path: str) -> Optional[str]:
+    """
+    生成按中心维度聚合的管理看板 JSON，包含：
+    - 每个中心的发布总数/成功率/失败数/回滚数
+    - 最近一次发布时间、版本、状态
+    - 当前是否有灰度中，以及在哪个阶段
+    - 风险级别分布
+    """
+    try:
+        centers_list = []
+        all_grayscale_now = db.list_releases({"status": "grayscale"})
+        all_paused = db.list_releases({"status": "paused"})
+        active_versions_count = len(all_grayscale_now) + len(all_paused)
+
+        for dc in DISTRIBUTION_CENTERS:
+            cid = dc["id"]
+            cname = dc["name"]
+            region = dc["region"]
+
+            releases_for_center = db.list_releases_for_center(cid)
+
+            release_total = len(releases_for_center)
+            release_success = 0
+            release_failed = 0
+            release_rollback = 0
+            release_in_progress = 0
+            risk_dist: Dict[str, int] = {"normal": 0, "emergency": 0, "low": 0}
+
+            for r in releases_for_center:
+                s = r["status"]
+                rl = r.get("risk_level") or "normal"
+                risk_dist[rl] = risk_dist.get(rl, 0) + 1
+                if s in SUCCESS_STATUSES and not r["rollback_triggered"]:
+                    release_success += 1
+                elif s in FAILED_STATUSES:
+                    release_failed += 1
+                    if s == "rolled_back" or r["rollback_triggered"]:
+                        release_rollback += 1
+                else:
+                    release_in_progress += 1
+
+            success_rate = (release_success / release_total) if release_total > 0 else 0.0
+
+            latest = db.get_center_latest_release(cid)
+            current_gs = db.get_center_current_grayscale(cid)
+
+            maintenance = db.list_center_maintenances(center_id=cid, only_active=True)
+            active_maintenance = [
+                {
+                    "id": m["id"],
+                    "name": m["name"],
+                    "start": m["start"],
+                    "end": m["end"],
+                    "reason": m.get("reason"),
+                }
+                for m in maintenance
+            ]
+
+            centers_list.append({
+                "center_id": cid,
+                "center_name": cname,
+                "region": region,
+                "release_total": release_total,
+                "release_success": release_success,
+                "release_failed": release_failed,
+                "release_rollback": release_rollback,
+                "release_in_progress": release_in_progress,
+                "success_rate": round(success_rate, 6),
+                "risk_distribution": {k: v for k, v in risk_dist.items() if v > 0},
+                "latest_release": {
+                    "version": latest["version"] if latest else None,
+                    "status": latest["status"] if latest else None,
+                    "status_cn": (
+                        RELEASE_STATUS_LABELS.get(latest["status"], latest["status"])
+                        if latest else None
+                    ),
+                    "released_at": latest.get("updated_at") if latest else None,
+                    "submitter": latest.get("submitter") if latest else None,
+                } if latest else None,
+                "current_grayscale": {
+                    "version": current_gs["version"] if current_gs else None,
+                    "stage": current_gs.get("stage_name") if current_gs else None,
+                    "status": current_gs["status"] if current_gs else None,
+                    "started_at": current_gs.get("started_at") if current_gs else None,
+                    "gs_center_ids": current_gs.get("gs_center_ids") if current_gs else None,
+                } if current_gs else None,
+                "active_maintenance_windows": active_maintenance,
+            })
+
+        centers_list.sort(key=lambda x: (-x["success_rate"] if x["release_total"] else -1,
+                                         -x["release_total"]))
+
+        total_all = sum(c["release_total"] for c in centers_list)
+        success_all = sum(c["release_success"] for c in centers_list)
+        rollback_all = sum(c["release_rollback"] for c in centers_list)
+        failed_all = sum(c["release_failed"] for c in centers_list)
+        grayscale_centers_now = [c for c in centers_list if c["current_grayscale"]]
+        maintenance_centers_now = [c for c in centers_list if c["active_maintenance_windows"]]
+
+        output = {
+            "generated_at": datetime.now().isoformat(timespec="seconds"),
+            "summary": {
+                "center_count": len(DISTRIBUTION_CENTERS),
+                "release_total": total_all,
+                "release_success": success_all,
+                "release_failed": failed_all,
+                "release_rollback": rollback_all,
+                "overall_success_rate": round(
+                    (success_all / total_all) if total_all > 0 else 0.0, 6
+                ),
+                "active_grayscale_releases": active_versions_count,
+                "centers_in_grayscale": len(grayscale_centers_now),
+                "centers_in_maintenance": len(maintenance_centers_now),
+            },
+            "centers": centers_list,
+            "grayscale_now": [
+                {
+                    "center_id": c["center_id"],
+                    "center_name": c["center_name"],
+                    "version": c["current_grayscale"]["version"],
+                    "stage": c["current_grayscale"]["stage"],
+                }
+                for c in grayscale_centers_now
+            ],
+            "maintenance_now": [
+                {
+                    "center_id": c["center_id"],
+                    "center_name": c["center_name"],
+                    "windows": c["active_maintenance_windows"],
+                }
+                for c in maintenance_centers_now
+            ],
+        }
+        with open(out_path, "w", encoding="utf-8") as f:
+            json.dump(output, f, ensure_ascii=False, indent=2, default=str)
+        logger.info(f"中心维度看板 JSON 已生成: {out_path}")
+        return out_path
+    except Exception as e:
+        logger.error(f"生成中心维度看板 JSON 失败: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
         return None
 
 
@@ -729,17 +874,19 @@ def generate_weekly_report(ref_date: Optional[datetime] = None) -> Dict:
     pdf_path = os.path.join(REPORTS_DIR, f"weekly_report_{tag}.pdf")
     excel_path = os.path.join(REPORTS_DIR, f"weekly_report_{tag}.xlsx")
     json_path = os.path.join(REPORTS_DIR, f"weekly_summary_{tag}.json")
+    center_dashboard_path = os.path.join(REPORTS_DIR, f"center_dashboard_{tag}.json")
 
     chart = _make_chart(stats, chart_path)
     pdf = _make_pdf(stats, chart, pdf_path)
     xls = _make_excel(stats, excel_path)
     jsn = _make_json_summary(stats, json_path)
+    center_dashboard = _make_center_dashboard(center_dashboard_path)
 
     report_id = db.insert_weekly_report(
         stats["week_start"], stats["week_end"],
         stats["release_total"], stats["release_success"],
         stats["rollback_count"], stats["avg_approval_seconds"],
-        pdf, xls, jsn,
+        pdf, xls, jsn, center_dashboard,
     )
     if pdf and xls:
         notifier.notify_weekly_report_ready(report_id, pdf, xls)
@@ -750,5 +897,6 @@ def generate_weekly_report(ref_date: Optional[datetime] = None) -> Dict:
         "pdf": pdf,
         "excel": xls,
         "json": jsn,
+        "center_dashboard": center_dashboard,
         "chart": chart,
     }

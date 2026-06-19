@@ -42,6 +42,10 @@ def sample_release_once(release_id: int, inject_anomaly_center: Optional[str] = 
     if not release:
         return {}
 
+    if release.get("status") == "paused":
+        logger.info(f"版本 {release['version']} 处于暂停状态，跳过监控采样")
+        return {}
+
     current_stage = db.get_current_stage(release_id)
     if not current_stage:
         logger.info(f"版本 {release['version']} 无运行中灰度阶段，跳过监控采样")

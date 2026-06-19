@@ -118,7 +118,16 @@ def _in_freeze_window(
                 ),
             })
 
-    for cid, maintenance_list in CENTER_MAINTENANCE_WINDOWS.items():
+    static_maintenance = dict(CENTER_MAINTENANCE_WINDOWS)
+    dynamic_maintenance = db.list_all_center_maintenances_from_db()
+
+    all_maintenance: Dict[str, List[Dict]] = {}
+    for cid, lst in static_maintenance.items():
+        all_maintenance.setdefault(cid, []).extend(lst)
+    for cid, lst in dynamic_maintenance.items():
+        all_maintenance.setdefault(cid, []).extend(lst)
+
+    for cid, maintenance_list in all_maintenance.items():
         if target_set and cid not in target_set:
             continue
         for mw in maintenance_list:
@@ -126,8 +135,9 @@ def _in_freeze_window(
                 start_dt = datetime.fromisoformat(mw["start"])
                 end_dt = datetime.fromisoformat(mw["end"])
                 if start_dt <= now <= end_dt:
+                    name = mw.get("_name") or f"中心维护-{cid}"
                     hits.append({
-                        "name": f"中心维护-{cid}",
+                        "name": f"{name}-{cid}",
                         "detail": f"{start_dt.isoformat(timespec='minutes')} ~ {end_dt.isoformat(timespec='minutes')}",
                         "center_ids": [cid],
                         "level": mw.get("level", "block_normal"),

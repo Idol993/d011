@@ -71,13 +71,14 @@ RELEASE_STATUS_LABELS = {
     "approved": "审批通过",
     "rejected": "审批驳回",
     "grayscale": "灰度发布中",
+    "paused": "已暂停",
     "released": "已发布",
     "rolled_back": "已回滚",
 }
 
 SUCCESS_STATUSES = {"released"}
 FAILED_STATUSES = {"precheck_failed", "rejected", "rolled_back"}
-IN_PROGRESS_STATUSES = {"pending", "awaiting_approval", "approved", "grayscale"}
+IN_PROGRESS_STATUSES = {"pending", "awaiting_approval", "approved", "grayscale", "paused"}
 
 WEEKLY_REPORT_DAY = "monday"
 WEEKLY_REPORT_TIME = "09:00"

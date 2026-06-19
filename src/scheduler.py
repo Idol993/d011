@@ -6,14 +6,16 @@ import signal
 import threading
 import schedule
 from datetime import datetime, timedelta
-from typing import Dict, Optional
+from typing import Dict, Optional, List
 from .config import (SCHEDULER_PID_PATH, SCHEDULER_LOCK_PATH,
                      APPROVAL_TIMEOUT_MINUTES, APPROVAL_TIMEOUT_CHECK_INTERVAL,
-                     WEEKLY_REPORT_DAY, WEEKLY_REPORT_TIME)
+                     WEEKLY_REPORT_DAY, WEEKLY_REPORT_TIME,
+                     GRAYSCALE_STAGES)
 from .logger import get_logger
 from . import report
 from . import database as db
 from . import notifier
+from . import grayscale as gs
 
 logger = get_logger("scheduler")
 
@@ -115,6 +117,64 @@ def _approval_timeout_check():
             logger.error(f"写入调度器执行记录失败: {ex}")
 
 
+def _grayscale_progress_job():
+    """检查灰度阶段是否超过 wait_hours，推进到下一阶段，跳过 paused 发布"""
+    run_id = db.insert_scheduler_run("_grayscale_progress_job")
+    run_status = "success"
+    result_text = None
+    err_text = None
+    promoted = 0
+    skipped_paused = 0
+    try:
+        db.init_db()
+        releases = db.list_releases({"status": "grayscale"})
+        paused_releases = db.list_releases({"status": "paused"})
+        skipped_paused = len(paused_releases)
+        for rel in releases:
+            try:
+                current = db.get_current_stage(rel["id"])
+                if not current:
+                    continue
+                started_at = current.get("started_at")
+                if not started_at:
+                    continue
+                stage_def = next(
+                    (s for s in GRAYSCALE_STAGES if s["name"] == current["stage_name"]),
+                    None,
+                )
+                if not stage_def:
+                    continue
+                wait_hours = stage_def["wait_hours"]
+                if wait_hours <= 0:
+                    continue
+                try:
+                    dt_started = datetime.fromisoformat(started_at)
+                except Exception:
+                    continue
+                elapsed_hours = (datetime.now() - dt_started).total_seconds() / 3600.0
+                if elapsed_hours < wait_hours:
+                    continue
+                logger.info(
+                    f"版本 {rel['version']} 阶段 {current['stage_name']} "
+                    f"已等待 {elapsed_hours:.1f}h >= {wait_hours}h，自动推进下一阶段"
+                )
+                gs.complete_current_stage(rel["id"])
+                gs.start_next_stage(rel["id"])
+                promoted += 1
+            except Exception as ex:
+                logger.error(f"自动推进灰度失败 release={rel['id']}: {ex}")
+        result_text = f"promoted={promoted}, skipped_paused={skipped_paused}"
+    except Exception as e:
+        run_status = "failed"
+        err_text = str(e)
+        logger.error(f"灰度推进巡检异常: {e}")
+    finally:
+        try:
+            db.complete_scheduler_run(run_id, run_status, result=result_text, error_detail=err_text)
+        except Exception as ex:
+            logger.error(f"写入调度器执行记录失败: {ex}")
+
+
 def get_next_report_time() -> Optional[datetime]:
     now = datetime.now()
     day_map = {
@@ -140,6 +200,7 @@ def _run_foreground_loop():
 
     getattr(schedule.every(), WEEKLY_REPORT_DAY).at(WEEKLY_REPORT_TIME).do(_weekly_report_job)
     schedule.every(APPROVAL_TIMEOUT_CHECK_INTERVAL).seconds.do(_approval_timeout_check)
+    schedule.every(10).minutes.do(_grayscale_progress_job)
 
     next_time = get_next_report_time()
     logger.info(f"调度器已启动 PID={os.getpid()}, "
@@ -219,7 +280,7 @@ def get_scheduler_status() -> Dict:
 
     recent_runs = db.list_scheduler_runs(limit=20) if hasattr(db, "list_scheduler_runs") else []
 
-    known_jobs = ["_weekly_report_job", "_approval_timeout_check"]
+    known_jobs = ["_weekly_report_job", "_approval_timeout_check", "_grayscale_progress_job"]
     last_run_by_job = {}
     for j in known_jobs:
         last = db.get_last_scheduler_run(j) if hasattr(db, "get_last_scheduler_run") else None

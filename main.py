@@ -157,20 +157,33 @@ def cmd_grayscale(args):
         stage = grayscale.start_next_stage(args.release_id)
         if stage:
             print(f"已启动灰度阶段: {stage['stage_name']}, 覆盖中心: {stage['center_ids']}")
+            if stage.get("target_centers"):
+                print(f"目标中心限定: {stage['target_centers']} (共 {len(stage['target_centers'])} 个)")
         else:
-            print("无可启动的灰度阶段")
+            print("无可启动的灰度阶段(可能已全部覆盖目标中心或已暂停)")
     elif args.action == "complete":
         grayscale.complete_current_stage(args.release_id)
         print("已完成当前灰度阶段")
     elif args.action == "status":
         status = grayscale.get_grayscale_status(args.release_id)
-        print(f"\n=== 版本 {status['release']['version']} 灰度状态 ===")
+        rel = status["release"]
+        print(f"\n=== 版本 {rel['version']} 灰度状态 ===")
+        st_label = RELEASE_STATUS_LABELS.get(rel["status"], rel["status"])
+        paused_note = " (已暂停)" if rel["status"] == "paused" else ""
+        print(f"当前状态: {st_label}{paused_note}")
+        targets = rel.get("target_center_ids")
+        if isinstance(targets, list) and targets:
+            print(f"目标分拨中心: {targets} (共 {len(targets)} 个)")
         for s in status["stages"]:
             print(f"  [{s['status']:9}] {s['stage_name']:12} -> {s['center_ids']}")
         print(f"已部署中心: {status['deployed_centers']}")
+        if isinstance(targets, list) and targets:
+            remaining = [c for c in targets if c not in status["deployed_centers"]]
+            print(f"剩余待部署: {remaining or '(已全部完成)'}")
     elif args.action == "plan":
         for s in grayscale.get_stage_plan():
-            print(f"  {s['name']:12} 覆盖{s['centers'] if s['centers'] != -1 else '全部'}个中心, 等待{s['wait_hours']}h")
+            cnt = "全部" if s["centers"] == -1 else f"{s['centers']}个"
+            print(f"  {s['name']:12} 覆盖{cnt}中心, 等待{s['wait_hours']}h")
 
 
 def cmd_monitor(args):
@@ -269,19 +282,22 @@ def cmd_report(args):
                 print(f"  {name}({role}): {avg_s/60:.1f} 分钟")
         if result.get("json"):
             print(f"\nJSON 汇总: {result['json']}")
+        if result.get("center_dashboard"):
+            print(f"中心看板: {result['center_dashboard']}")
         if result["pdf"]:
             print(f"\nPDF 报表: {result['pdf']}")
         if result["excel"]:
             print(f"Excel 报表: {result['excel']}")
     elif args.action == "list":
         reps = db.list_weekly_reports()
-        print(f"{'ID':<5} {'开始':<20} {'结束':<20} {'发布':<6} {'成功':<6} {'回滚':<6} {'审批(min)':<10} JSON")
-        print("-" * 100)
+        print(f"{'ID':<5} {'开始':<20} {'结束':<20} {'发布':<6} {'成功':<6} {'回滚':<6} {'审批(min)':<10} JSON  看板")
+        print("-" * 110)
         for r in reps:
             json_exists = "✓" if r.get("json_path") else ""
+            dashboard_exists = "✓" if r.get("center_dashboard_path") else ""
             print(f"{r['id']:<5} {r['week_start']:<20} {r['week_end']:<20} "
                   f"{r['release_total']:<6} {r['release_success']:<6} "
-                  f"{r['rollback_count']:<6} {r['avg_approval_seconds']/60:<10.1f} {json_exists}")
+                  f"{r['rollback_count']:<6} {r['avg_approval_seconds']/60:<10.1f} {json_exists:<5} {dashboard_exists}")
 
 
 def cmd_scheduler(args):
@@ -334,6 +350,7 @@ def cmd_scheduler(args):
             label_map = {
                 "_weekly_report_job": "【周报生成】",
                 "_approval_timeout_check": "【审批超时巡检】",
+                "_grayscale_progress_job": "【灰度阶段推进】",
             }
             print(f"\n=== 最近任务执行记录 (持久化，重启可见) ===")
             for job_key, info in last_runs.items():
@@ -407,6 +424,13 @@ def cmd_history(args):
         print(f"触发回滚: {'是' if r['rollback_triggered'] else '否'}")
         if r.get("rollback_reason"):
             print(f"回滚原因: {r['rollback_reason']}")
+        if r.get("status") == "paused" or r.get("paused_at"):
+            print(f"\n-- 暂停信息 --")
+            print(f"  暂停时间: {r.get('paused_at') or '-'}")
+            print(f"  暂停操作人: {r.get('paused_by') or '-'}")
+            print(f"  暂停原因: {r.get('paused_reason') or '-'}")
+            if r.get("resumed_at"):
+                print(f"  恢复时间: {r['resumed_at']}")
         bypassed = r.get("governance_bypassed")
         if isinstance(bypassed, list) and bypassed:
             print(f"\n-- 发布治理: 已绕过 {len(bypassed)} 个冻结窗口 --")
@@ -443,6 +467,76 @@ def cmd_history(args):
             print(f"已导出到: {path}")
         else:
             print("导出失败")
+
+
+def cmd_release(args):
+    db.init_db()
+    if args.action == "pause":
+        ok = db.pause_release(args.release_id, operator=args.operator, reason=args.reason)
+        if ok:
+            print(f"✓ 发布 #{args.release_id} 已暂停")
+            print(f"  操作人: {args.operator or '(未填)'}")
+            print(f"  原因: {args.reason or '(未说明)'}")
+        else:
+            print("✗ 暂停失败：发布不存在或状态不允许暂停(需处于 grayscale/approved 状态)")
+    elif args.action == "resume":
+        new_status = db.resume_release(args.release_id, operator=args.operator, reason=args.reason)
+        if new_status:
+            st_cn = RELEASE_STATUS_LABELS.get(new_status, new_status)
+            print(f"✓ 发布 #{args.release_id} 已恢复，当前状态: {st_cn}")
+            print(f"  操作人: {args.operator or '(未填)'}")
+            print(f"  原因: {args.reason or '(未说明)'}")
+        else:
+            print("✗ 恢复失败：发布不存在或未处于暂停状态")
+
+
+def cmd_maintenance(args):
+    db.init_db()
+    if args.action == "list":
+        filters = {}
+        if args.center:
+            mws = db.list_center_maintenances(center_id=args.center, only_active=args.active_only)
+        else:
+            mws = db.list_center_maintenances(only_active=args.active_only)
+        if not mws:
+            print("(无维护窗口记录)")
+            return
+        print(f"{'ID':<5} {'中心':<8} {'名称':<22} {'开始时间':<20} {'结束时间':<20} {'级别':<13} {'操作人':<10} 原因")
+        print("-" * 110)
+        for m in mws:
+            reason = m.get("reason") or ""
+            if len(reason) > 30:
+                reason = reason[:28] + ".."
+            print(f"{m['id']:<5} {m['center_id']:<8} {m['name']:<22} "
+                  f"{m['start']:<20} {m['end']:<20} "
+                  f"{m.get('level', 'block_normal'):<13} "
+                  f"{m.get('operator') or '-':<10} {reason}")
+    elif args.action == "add":
+        if not args.center or not args.name or not args.start or not args.end:
+            print("✗ --center --name --start --end 都必须填写")
+            return
+        mid = db.insert_center_maintenance(
+            center_id=args.center,
+            name=args.name,
+            start=args.start,
+            end=args.end,
+            reason=args.reason,
+            operator=args.operator,
+            level=args.level or "block_normal",
+        )
+        print(f"✓ 已创建维护窗口 #{mid}: {args.center} {args.name}")
+        print(f"  时间: {args.start} ~ {args.end}")
+        if args.reason:
+            print(f"  原因: {args.reason}")
+    elif args.action == "remove":
+        if not args.id:
+            print("✗ --id 必须指定")
+            return
+        ok = db.delete_center_maintenance(args.id, operator=args.operator)
+        if ok:
+            print(f"✓ 维护窗口 #{args.id} 已删除")
+        else:
+            print(f"✗ 删除失败：维护窗口 #{args.id} 不存在")
 
 
 def cmd_logs(args):
@@ -538,6 +632,26 @@ def main():
     p.add_argument("--format", choices=["excel", "csv", "json"], default="excel")
     p.add_argument("--prefix", default="release_export")
     p.set_defaults(func=cmd_history)
+
+    p = sub.add_parser("release", help="发布运维(暂停/恢复)")
+    p.add_argument("action", choices=["pause", "resume"])
+    p.add_argument("--release-id", type=int, required=True, help="发布ID")
+    p.add_argument("--operator", help="操作人")
+    p.add_argument("--reason", help="暂停/恢复原因")
+    p.set_defaults(func=cmd_release)
+
+    p = sub.add_parser("maintenance", help="中心维护窗口管理(增删查)")
+    p.add_argument("action", choices=["list", "add", "remove"])
+    p.add_argument("--id", type=int, help="维护窗口ID (remove时用)")
+    p.add_argument("--center", help="分拨中心ID, 如 DC009")
+    p.add_argument("--name", help="维护窗口名称")
+    p.add_argument("--start", help="开始时间 YYYY-MM-DDTHH:MM:SS")
+    p.add_argument("--end", help="结束时间 YYYY-MM-DDTHH:MM:SS")
+    p.add_argument("--reason", help="维护原因")
+    p.add_argument("--operator", help="操作人")
+    p.add_argument("--level", default="block_normal", help="拦截级别: block_normal(默认,只拦普通发布)")
+    p.add_argument("--active-only", action="store_true", help="只显示未过期的窗口")
+    p.set_defaults(func=cmd_maintenance)
 
     p = sub.add_parser("logs", help="查看操作日志")
     p.add_argument("--limit", type=int, default=50)

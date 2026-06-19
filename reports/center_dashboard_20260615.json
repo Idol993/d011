@@ -1,0 +1,259 @@
+{
+  "generated_at": "2026-06-19T12:10:10",
+  "summary": {
+    "center_count": 12,
+    "release_total": 3,
+    "release_success": 2,
+    "release_failed": 0,
+    "release_rollback": 0,
+    "overall_success_rate": 0.666667,
+    "active_grayscale_releases": 1,
+    "centers_in_grayscale": 1,
+    "centers_in_maintenance": 1
+  },
+  "centers": [
+    {
+      "center_id": "DC009",
+      "center_name": "沈阳分拨中心",
+      "region": "东北",
+      "release_total": 1,
+      "release_success": 1,
+      "release_failed": 0,
+      "release_rollback": 0,
+      "release_in_progress": 0,
+      "success_rate": 1.0,
+      "risk_distribution": {
+        "emergency": 1
+      },
+      "latest_release": {
+        "version": "v7.1.0-small",
+        "status": "released",
+        "status_cn": "已发布",
+        "released_at": "2026-06-19T12:10:09",
+        "submitter": "测试开发"
+      },
+      "current_grayscale": null,
+      "active_maintenance_windows": [
+        {
+          "id": 2,
+          "name": "DC009 618保障维护",
+          "start": "2026-06-15T00:00:00",
+          "end": "2026-06-25T23:59:59",
+          "reason": "618大促期间维护"
+        }
+      ]
+    },
+    {
+      "center_id": "DC010",
+      "center_name": "南京分拨中心",
+      "region": "华东",
+      "release_total": 1,
+      "release_success": 1,
+      "release_failed": 0,
+      "release_rollback": 0,
+      "release_in_progress": 0,
+      "success_rate": 1.0,
+      "risk_distribution": {
+        "emergency": 1
+      },
+      "latest_release": {
+        "version": "v7.1.0-small",
+        "status": "released",
+        "status_cn": "已发布",
+        "released_at": "2026-06-19T12:10:09",
+        "submitter": "测试开发"
+      },
+      "current_grayscale": null,
+      "active_maintenance_windows": []
+    },
+    {
+      "center_id": "DC001",
+      "center_name": "北京分拨中心",
+      "region": "华北",
+      "release_total": 0,
+      "release_success": 0,
+      "release_failed": 0,
+      "release_rollback": 0,
+      "release_in_progress": 0,
+      "success_rate": 0.0,
+      "risk_distribution": {},
+      "latest_release": null,
+      "current_grayscale": null,
+      "active_maintenance_windows": []
+    },
+    {
+      "center_id": "DC002",
+      "center_name": "上海分拨中心",
+      "region": "华东",
+      "release_total": 0,
+      "release_success": 0,
+      "release_failed": 0,
+      "release_rollback": 0,
+      "release_in_progress": 0,
+      "success_rate": 0.0,
+      "risk_distribution": {},
+      "latest_release": null,
+      "current_grayscale": null,
+      "active_maintenance_windows": []
+    },
+    {
+      "center_id": "DC004",
+      "center_name": "深圳分拨中心",
+      "region": "华南",
+      "release_total": 0,
+      "release_success": 0,
+      "release_failed": 0,
+      "release_rollback": 0,
+      "release_in_progress": 0,
+      "success_rate": 0.0,
+      "risk_distribution": {},
+      "latest_release": null,
+      "current_grayscale": null,
+      "active_maintenance_windows": []
+    },
+    {
+      "center_id": "DC005",
+      "center_name": "成都分拨中心",
+      "region": "西南",
+      "release_total": 0,
+      "release_success": 0,
+      "release_failed": 0,
+      "release_rollback": 0,
+      "release_in_progress": 0,
+      "success_rate": 0.0,
+      "risk_distribution": {},
+      "latest_release": null,
+      "current_grayscale": null,
+      "active_maintenance_windows": []
+    },
+    {
+      "center_id": "DC006",
+      "center_name": "武汉分拨中心",
+      "region": "华中",
+      "release_total": 0,
+      "release_success": 0,
+      "release_failed": 0,
+      "release_rollback": 0,
+      "release_in_progress": 0,
+      "success_rate": 0.0,
+      "risk_distribution": {},
+      "latest_release": null,
+      "current_grayscale": null,
+      "active_maintenance_windows": []
+    },
+    {
+      "center_id": "DC007",
+      "center_name": "杭州分拨中心",
+      "region": "华东",
+      "release_total": 0,
+      "release_success": 0,
+      "release_failed": 0,
+      "release_rollback": 0,
+      "release_in_progress": 0,
+      "success_rate": 0.0,
+      "risk_distribution": {},
+      "latest_release": null,
+      "current_grayscale": null,
+      "active_maintenance_windows": []
+    },
+    {
+      "center_id": "DC008",
+      "center_name": "西安分拨中心",
+      "region": "西北",
+      "release_total": 0,
+      "release_success": 0,
+      "release_failed": 0,
+      "release_rollback": 0,
+      "release_in_progress": 0,
+      "success_rate": 0.0,
+      "risk_distribution": {},
+      "latest_release": null,
+      "current_grayscale": null,
+      "active_maintenance_windows": []
+    },
+    {
+      "center_id": "DC011",
+      "center_name": "重庆分拨中心",
+      "region": "西南",
+      "release_total": 0,
+      "release_success": 0,
+      "release_failed": 0,
+      "release_rollback": 0,
+      "release_in_progress": 0,
+      "success_rate": 0.0,
+      "risk_distribution": {},
+      "latest_release": null,
+      "current_grayscale": null,
+      "active_maintenance_windows": []
+    },
+    {
+      "center_id": "DC012",
+      "center_name": "天津分拨中心",
+      "region": "华北",
+      "release_total": 0,
+      "release_success": 0,
+      "release_failed": 0,
+      "release_rollback": 0,
+      "release_in_progress": 0,
+      "success_rate": 0.0,
+      "risk_distribution": {},
+      "latest_release": null,
+      "current_grayscale": null,
+      "active_maintenance_windows": []
+    },
+    {
+      "center_id": "DC003",
+      "center_name": "广州分拨中心",
+      "region": "华南",
+      "release_total": 1,
+      "release_success": 0,
+      "release_failed": 0,
+      "release_rollback": 0,
+      "release_in_progress": 1,
+      "success_rate": 0.0,
+      "risk_distribution": {
+        "emergency": 1
+      },
+      "latest_release": {
+        "version": "v7.2.0-pausetest",
+        "status": "grayscale",
+        "status_cn": "灰度发布中",
+        "released_at": "2026-06-19T12:10:09",
+        "submitter": "测试"
+      },
+      "current_grayscale": {
+        "version": "v7.2.0-pausetest",
+        "stage": "pilot",
+        "status": "grayscale",
+        "started_at": null,
+        "gs_center_ids": [
+          "DC003"
+        ]
+      },
+      "active_maintenance_windows": []
+    }
+  ],
+  "grayscale_now": [
+    {
+      "center_id": "DC003",
+      "center_name": "广州分拨中心",
+      "version": "v7.2.0-pausetest",
+      "stage": "pilot"
+    }
+  ],
+  "maintenance_now": [
+    {
+      "center_id": "DC009",
+      "center_name": "沈阳分拨中心",
+      "windows": [
+        {
+          "id": 2,
+          "name": "DC009 618保障维护",
+          "start": "2026-06-15T00:00:00",
+          "end": "2026-06-25T23:59:59",
+          "reason": "618大促期间维护"
+        }
+      ]
+    }
+  ]
+}

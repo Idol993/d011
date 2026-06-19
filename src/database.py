@@ -160,6 +160,18 @@ def init_db():
                 error_detail TEXT,
                 duration_seconds REAL
             );
+
+            CREATE TABLE IF NOT EXISTS center_maintenance_windows (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                center_id TEXT NOT NULL,
+                name TEXT NOT NULL,
+                start TEXT NOT NULL,
+                end TEXT NOT NULL,
+                level TEXT NOT NULL DEFAULT 'block_normal',
+                reason TEXT,
+                operator TEXT,
+                created_at TEXT NOT NULL
+            );
             """
         )
         _migrate(conn)
@@ -209,6 +221,21 @@ def _migrate(conn):
     except sqlite3.OperationalError:
         cur.execute("ALTER TABLE weekly_reports ADD COLUMN json_path TEXT")
         logger.info("Migrated: added weekly_reports.json_path")
+
+    try:
+        cur.execute("SELECT paused_reason FROM releases LIMIT 1")
+    except sqlite3.OperationalError:
+        cur.execute("ALTER TABLE releases ADD COLUMN paused_at TEXT")
+        cur.execute("ALTER TABLE releases ADD COLUMN paused_by TEXT")
+        cur.execute("ALTER TABLE releases ADD COLUMN paused_reason TEXT")
+        cur.execute("ALTER TABLE releases ADD COLUMN resumed_at TEXT")
+        logger.info("Migrated: added releases pause/resume fields")
+
+    try:
+        cur.execute("SELECT center_dashboard_path FROM weekly_reports LIMIT 1")
+    except sqlite3.OperationalError:
+        cur.execute("ALTER TABLE weekly_reports ADD COLUMN center_dashboard_path TEXT")
+        logger.info("Migrated: added weekly_reports.center_dashboard_path")
 
 
 def insert_release(version: str, risk_level: str, description: str,
@@ -829,19 +856,206 @@ def insert_weekly_report(week_start: str, week_end: str, release_total: int,
                          release_success: int, rollback_count: int,
                          avg_approval_seconds: float, pdf_path: Optional[str],
                          excel_path: Optional[str],
-                         json_path: Optional[str] = None) -> int:
+                         json_path: Optional[str] = None,
+                         center_dashboard_path: Optional[str] = None) -> int:
     now = datetime.now().isoformat(timespec="seconds")
     with get_conn() as conn:
         cur = conn.cursor()
         cur.execute(
             """INSERT INTO weekly_reports
                (week_start, week_end, release_total, release_success,
-                rollback_count, avg_approval_seconds, pdf_path, excel_path, json_path, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                rollback_count, avg_approval_seconds, pdf_path, excel_path,
+                json_path, center_dashboard_path, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (week_start, week_end, release_total, release_success, rollback_count,
-             avg_approval_seconds, pdf_path, excel_path, json_path, now),
+             avg_approval_seconds, pdf_path, excel_path, json_path,
+             center_dashboard_path, now),
         )
         report_id = cur.lastrowid
         _log(conn, "report", "create", None, report_id,
              f"周报 {week_start} ~ {week_end}")
         return report_id
+
+
+def insert_center_maintenance(center_id: str, name: str, start: str, end: str,
+                              reason: Optional[str] = None,
+                              operator: Optional[str] = None,
+                              level: str = "block_normal") -> int:
+    now = datetime.now().isoformat(timespec="seconds")
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            """INSERT INTO center_maintenance_windows
+               (center_id, name, start, end, level, reason, operator, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (center_id, name, start, end, level, reason, operator, now),
+        )
+        mid = cur.lastrowid
+        _log(conn, "maintenance", "add", operator, mid,
+             f"{center_id} {name}: {start} ~ {end}")
+        return mid
+
+
+def list_center_maintenances(center_id: Optional[str] = None,
+                             only_active: bool = False) -> List[Dict]:
+    sql = "SELECT * FROM center_maintenance_windows WHERE 1=1"
+    params: List[Any] = []
+    if center_id:
+        sql += " AND center_id = ?"
+        params.append(center_id)
+    if only_active:
+        now = datetime.now().isoformat(timespec="seconds")
+        sql += " AND end >= ?"
+        params.append(now)
+    sql += " ORDER BY id DESC"
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute(sql, params)
+        return cur.fetchall()
+
+
+def delete_center_maintenance(maintenance_id: int,
+                              operator: Optional[str] = None) -> bool:
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM center_maintenance_windows WHERE id=?",
+                    (maintenance_id,))
+        row = cur.fetchone()
+        if not row:
+            return False
+        cur.execute("DELETE FROM center_maintenance_windows WHERE id=?",
+                    (maintenance_id,))
+        _log(conn, "maintenance", "remove", operator, maintenance_id,
+             f"删除 {row['center_id']} {row['name']}")
+        return True
+
+
+def pause_release(release_id: int, operator: Optional[str] = None,
+                  reason: Optional[str] = None) -> bool:
+    now = datetime.now().isoformat(timespec="seconds")
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            """UPDATE releases
+               SET status='paused', paused_at=?, paused_by=?, paused_reason=?, updated_at=?
+               WHERE id=? AND status IN ('grayscale', 'approved')""",
+            (now, operator, reason, now, release_id),
+        )
+        if cur.rowcount <= 0:
+            return False
+        _log(conn, "release", "pause", operator, release_id,
+             f"原因={reason or '未说明'}")
+        return True
+
+
+def resume_release(release_id: int, operator: Optional[str] = None,
+                   reason: Optional[str] = None) -> Optional[str]:
+    """恢复发布。返回恢复后的状态字符串（grayscale/approved），失败返回 None"""
+    now = datetime.now().isoformat(timespec="seconds")
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM grayscale_stages WHERE release_id=? AND status='running'",
+                    (release_id,))
+        has_running = cur.fetchone() is not None
+        cur.execute(
+            "SELECT status FROM releases WHERE id=? AND status='paused'",
+            (release_id,),
+        )
+        row = cur.fetchone()
+        if not row:
+            return None
+        new_status = "grayscale" if has_running else "approved"
+        cur.execute(
+            """UPDATE releases
+               SET status=?, resumed_at=?, updated_at=?
+               WHERE id=? AND status='paused'""",
+            (new_status, now, now, release_id),
+        )
+        _log(conn, "release", "resume", operator, release_id,
+             f"恢复至状态={new_status}, 原因={reason or '未说明'}")
+        return new_status
+
+
+def list_releases_for_center(center_id: str) -> List[Dict]:
+    """查询某个中心参与过的所有发布（通过灰度阶段的 center_ids 判断）"""
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            """SELECT DISTINCT r.* FROM releases r
+               JOIN grayscale_stages gs ON r.id = gs.release_id
+               WHERE gs.center_ids LIKE ?
+               ORDER BY r.id DESC""",
+            (f'%"{center_id}"%',),
+        )
+        rows = cur.fetchall()
+        for r in rows:
+            if r.get("governance_bypassed"):
+                try:
+                    r["governance_bypassed"] = json.loads(r["governance_bypassed"])
+                except Exception:
+                    pass
+            if r.get("target_center_ids"):
+                try:
+                    r["target_center_ids"] = json.loads(r["target_center_ids"])
+                except Exception:
+                    pass
+        return rows
+
+
+def get_center_latest_release(center_id: str) -> Optional[Dict]:
+    """获取某中心最近一次参与的发布"""
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            """SELECT r.* FROM releases r
+               JOIN grayscale_stages gs ON r.id = gs.release_id
+               WHERE gs.center_ids LIKE ?
+               ORDER BY r.id DESC LIMIT 1""",
+            (f'%"{center_id}"%',),
+        )
+        row = cur.fetchone()
+        if row and row.get("target_center_ids"):
+            try:
+                row["target_center_ids"] = json.loads(row["target_center_ids"])
+            except Exception:
+                pass
+        return row
+
+
+def get_center_current_grayscale(center_id: str) -> Optional[Dict]:
+    """查询中心当前是否处于灰度中状态"""
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            """SELECT r.*, gs.stage_name, gs.center_ids AS gs_center_ids
+               FROM releases r
+               JOIN grayscale_stages gs ON r.id = gs.release_id AND gs.status='running'
+               WHERE r.status='grayscale' AND gs.center_ids LIKE ?
+               ORDER BY r.id DESC LIMIT 1""",
+            (f'%"{center_id}"%',),
+        )
+        row = cur.fetchone()
+        if row:
+            try:
+                row["gs_center_ids"] = json.loads(row["gs_center_ids"])
+            except Exception:
+                pass
+        return row
+
+
+def list_all_center_maintenances_from_db() -> Dict[str, List[Dict]]:
+    """把 DB 里的中心维护窗口转成 {cid: [mw1, mw2...]} 形式供治理用"""
+    rows = list_center_maintenances(only_active=True)
+    result: Dict[str, List[Dict]] = {}
+    for r in rows:
+        cid = r["center_id"]
+        result.setdefault(cid, []).append({
+            "start": r["start"],
+            "end": r["end"],
+            "reason": r.get("reason"),
+            "level": r.get("level", "block_normal"),
+            "_db_id": r["id"],
+            "_name": r["name"],
+            "_operator": r.get("operator"),
+        })
+    return result

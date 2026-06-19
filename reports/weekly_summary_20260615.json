@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-06-19T11:04:42",
+  "generated_at": "2026-06-19T12:10:09",
   "week_range": {
     "start": "2026-06-15T00:00:00",
     "end": "2026-06-21T23:59:59"
@@ -7,17 +7,17 @@
   "risk_ranking": [
     {
       "risk_level": "emergency",
-      "total": 1,
-      "success": 0,
-      "success_rate": 0.0,
+      "total": 3,
+      "success": 2,
+      "success_rate": 0.6666666666666666,
       "failed": 0,
       "rollback_count": 0
     },
     {
       "risk_level": "normal",
-      "total": 2,
-      "success": 1,
-      "success_rate": 0.5,
+      "total": 0,
+      "success": 0,
+      "success_rate": 0.0,
       "failed": 0,
       "rollback_count": 0
     }
@@ -27,17 +27,35 @@
   "approval_timeout_top": [],
   "center_success_rates": [
     {
-      "center_id": "DC002",
-      "center_name": "上海分拨中心",
-      "release_total": 0,
-      "success": 0,
-      "success_rate": 0.0,
+      "center_id": "DC001",
+      "center_name": "北京分拨中心",
+      "release_total": 1,
+      "success": 1,
+      "success_rate": 1.0,
       "rollback_count": 0,
       "failed_count": 0
     },
     {
-      "center_id": "DC003",
-      "center_name": "广州分拨中心",
+      "center_id": "DC009",
+      "center_name": "沈阳分拨中心",
+      "release_total": 1,
+      "success": 1,
+      "success_rate": 1.0,
+      "rollback_count": 0,
+      "failed_count": 0
+    },
+    {
+      "center_id": "DC010",
+      "center_name": "南京分拨中心",
+      "release_total": 1,
+      "success": 1,
+      "success_rate": 1.0,
+      "rollback_count": 0,
+      "failed_count": 0
+    },
+    {
+      "center_id": "DC002",
+      "center_name": "上海分拨中心",
       "release_total": 0,
       "success": 0,
       "success_rate": 0.0,
@@ -90,24 +108,6 @@
       "failed_count": 0
     },
     {
-      "center_id": "DC009",
-      "center_name": "沈阳分拨中心",
-      "release_total": 0,
-      "success": 0,
-      "success_rate": 0.0,
-      "rollback_count": 0,
-      "failed_count": 0
-    },
-    {
-      "center_id": "DC010",
-      "center_name": "南京分拨中心",
-      "release_total": 0,
-      "success": 0,
-      "success_rate": 0.0,
-      "rollback_count": 0,
-      "failed_count": 0
-    },
-    {
       "center_id": "DC011",
       "center_name": "重庆分拨中心",
       "release_total": 0,
@@ -126,21 +126,16 @@
       "failed_count": 0
     },
     {
-      "center_id": "DC001",
-      "center_name": "北京分拨中心",
-      "release_total": 2,
-      "success": 1,
-      "success_rate": 0.5,
+      "center_id": "DC003",
+      "center_name": "广州分拨中心",
+      "release_total": 1,
+      "success": 0,
+      "success_rate": 0.0,
       "rollback_count": 0,
       "failed_count": 0
     }
   ],
   "status_distribution": [
-    {
-      "status": "pending",
-      "status_cn": "待检查",
-      "count": 1
-    },
     {
       "status": "grayscale",
       "status_cn": "灰度发布中",
@@ -149,25 +144,21 @@
     {
       "status": "released",
       "status_cn": "已发布",
-      "count": 1
+      "count": 2
     }
   ],
   "risk_distribution": [
     {
       "risk_level": "emergency",
-      "count": 1
-    },
-    {
-      "risk_level": "normal",
-      "count": 2
+      "count": 3
     }
   ],
   "core_metrics": {
     "release_total": 3,
-    "release_success": 1,
-    "release_success_rate": 0.3333333333333333,
+    "release_success": 2,
+    "release_success_rate": 0.6666666666666666,
     "release_failed": 0,
-    "release_in_progress": 2,
+    "release_in_progress": 1,
     "rollback_count": 0,
     "avg_approval_minutes": 0.0,
     "per_role_avg_minutes": {}
@@ -175,8 +166,8 @@
   "weekly_comparison": {
     "current": {
       "total": 3,
-      "success": 1,
-      "success_rate": 0.3333333333333333,
+      "success": 2,
+      "success_rate": 0.6666666666666666,
       "rollback_count": 0
     },
     "previous": {
@@ -187,47 +178,47 @@
     },
     "delta": {
       "total_delta": 3,
-      "success_delta": 1,
-      "success_rate_delta_pct": 33.33333333333333,
+      "success_delta": 2,
+      "success_rate_delta_pct": 66.66666666666666,
       "rollback_delta": 0
     }
   },
   "releases": [
     {
       "release_id": 3,
-      "version": "v9.9.9-demo-emergency",
+      "version": "v7.2.0-pausetest",
       "risk_level": "emergency",
-      "status": "pending",
-      "status_cn": "待检查",
-      "submitter": "紧急值班",
+      "status": "grayscale",
+      "status_cn": "灰度发布中",
+      "submitter": "测试",
       "rollback_triggered": false,
-      "emergency_urgent": true,
-      "created_at": "2026-06-19T11:04:19",
-      "updated_at": "2026-06-19T11:04:19"
+      "emergency_urgent": false,
+      "created_at": "2026-06-19T12:10:09",
+      "updated_at": "2026-06-19T12:10:09"
     },
     {
       "release_id": 2,
-      "version": "v6.1.0-dc01",
-      "risk_level": "normal",
-      "status": "grayscale",
-      "status_cn": "灰度发布中",
-      "submitter": "开发A",
+      "version": "v7.1.0-small",
+      "risk_level": "emergency",
+      "status": "released",
+      "status_cn": "已发布",
+      "submitter": "测试开发",
       "rollback_triggered": false,
-      "emergency_urgent": false,
-      "created_at": "2026-06-19T11:04:19",
-      "updated_at": "2026-06-19T11:04:19"
+      "emergency_urgent": true,
+      "created_at": "2026-06-19T12:10:09",
+      "updated_at": "2026-06-19T12:10:09"
     },
     {
       "release_id": 1,
-      "version": "v6.0.0-stable",
-      "risk_level": "normal",
+      "version": "v7.0.0-stable",
+      "risk_level": "emergency",
       "status": "released",
       "status_cn": "已发布",
-      "submitter": "发布管理员",
+      "submitter": "管理员",
       "rollback_triggered": false,
       "emergency_urgent": false,
-      "created_at": "2026-06-19T11:04:19",
-      "updated_at": "2026-06-19T11:04:19"
+      "created_at": "2026-06-19T12:10:09",
+      "updated_at": "2026-06-19T12:10:09"
     }
   ]
 }
