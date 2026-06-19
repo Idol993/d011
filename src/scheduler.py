@@ -57,16 +57,37 @@ def is_scheduler_running() -> bool:
 
 def _weekly_report_job():
     logger.info("触发每周一自动生成周报任务")
+    run_id = db.insert_scheduler_run("_weekly_report_job")
+    status = "success"
+    result_text = None
+    err_text = None
     try:
         db.init_db()
         result = report.generate_weekly_report()
-        logger.info(f"周报自动生成完成: report_id={result['report_id']}, "
-                    f"PDF={result.get('pdf')}, Excel={result.get('excel')}")
+        result_text = (
+            f"report_id={result['report_id']}, "
+            f"success_rate={result['stats']['release_success_rate']*100:.2f}%, "
+            f"total={result['stats']['release_total']}, "
+            f"rollback={result['stats']['rollback_count']}"
+        )
+        logger.info(f"周报自动生成完成: {result_text}")
     except Exception as e:
+        status = "failed"
+        err_text = str(e)
         logger.error(f"自动生成周报失败: {e}")
+    finally:
+        try:
+            db.complete_scheduler_run(run_id, status, result=result_text, error_detail=err_text)
+        except Exception as ex:
+            logger.error(f"写入调度器执行记录失败: {ex}")
 
 
 def _approval_timeout_check():
+    run_id = db.insert_scheduler_run("_approval_timeout_check")
+    status = "success"
+    result_text = None
+    err_text = None
+    reminded_count = 0
     try:
         db.init_db()
         for risk_level, timeout_min in APPROVAL_TIMEOUT_MINUTES.items():
@@ -81,8 +102,17 @@ def _approval_timeout_check():
                                f"已等待{elapsed:.0f}分钟(阈值{timeout_min}分钟)")
                 notifier.notify_approval_timeout(version, role, elapsed, timeout_min)
                 db.mark_timeout_reminded(a["id"])
+                reminded_count += 1
+        result_text = f"reminded={reminded_count}"
     except Exception as e:
+        status = "failed"
+        err_text = str(e)
         logger.error(f"审批超时巡检异常: {e}")
+    finally:
+        try:
+            db.complete_scheduler_run(run_id, status, result=result_text, error_detail=err_text)
+        except Exception as ex:
+            logger.error(f"写入调度器执行记录失败: {ex}")
 
 
 def get_next_report_time() -> Optional[datetime]:
@@ -186,10 +216,37 @@ def get_scheduler_status() -> Dict:
             "next_run": str(job.next_run) if job.next_run else "?",
             "interval": str(job.interval) if hasattr(job, "interval") else "?",
         })
+
+    recent_runs = db.list_scheduler_runs(limit=20) if hasattr(db, "list_scheduler_runs") else []
+
+    known_jobs = ["_weekly_report_job", "_approval_timeout_check"]
+    last_run_by_job = {}
+    for j in known_jobs:
+        last = db.get_last_scheduler_run(j) if hasattr(db, "get_last_scheduler_run") else None
+        if last:
+            last_run_by_job[j] = {
+                "status": last["status"],
+                "started_at": last["started_at"],
+                "finished_at": last.get("finished_at"),
+                "duration_seconds": last.get("duration_seconds"),
+                "result": last.get("result"),
+                "error_detail": last.get("error_detail"),
+            }
+        else:
+            last_run_by_job[j] = {"status": "never"}
+
     return {
         "running": running,
         "pid": pid,
         "next_report_time": next_time.isoformat(timespec="seconds") if next_time else None,
         "jobs": jobs,
         "approval_timeouts": APPROVAL_TIMEOUT_MINUTES,
+        "last_runs": last_run_by_job,
+        "recent_runs_count": len(recent_runs),
+        "recent_runs_sample": [
+            {"id": r["id"], "job_name": r["job_name"], "status": r["status"],
+             "started_at": r["started_at"], "duration_seconds": r.get("duration_seconds"),
+             "error": r.get("error_detail")}
+            for r in recent_runs[:5]
+        ],
     }

@@ -94,10 +94,14 @@ def _in_freeze_window(
         else:
             try:
                 y = fw.get("year") or now.year
-                s_str = f"{y}-{fw['start']}" if "T" not in fw["start"] else fw["start"]
-                e_str = f"{y}-{fw['end']}" if "T" not in fw["end"] else fw["end"]
-                start_dt = datetime.fromisoformat(s_str)
-                end_dt = datetime.fromisoformat(e_str)
+                s_raw = fw["start"]
+                e_raw = fw["end"]
+                def _to_dt(s):
+                    if len(s) >= 10 and s[4] == "-":
+                        return datetime.fromisoformat(s)
+                    return datetime.fromisoformat(f"{y}-{s}")
+                start_dt = _to_dt(s_raw)
+                end_dt = _to_dt(e_raw)
                 if start_dt <= now <= end_dt:
                     in_window = True
                     window_detail = f"{start_dt.date()} ~ {end_dt.date()}"
@@ -174,6 +178,7 @@ def validate_release(
     stable_version: str = None,
     risk_level: str = "normal",
     target_center_ids: Optional[List[str]] = None,
+    now: Optional[datetime] = None,
 ) -> Tuple[bool, List[str], Dict]:
     """
     版本治理校验。
@@ -222,10 +227,28 @@ def validate_release(
     if active_releases:
         new_projected = set(_projected_centers_for_release(target_center_ids=target_center_ids))
         conflict_items = []
+        seen_ids = set()
         for r in active_releases:
+            if r["id"] in seen_ids:
+                continue
+            seen_ids.add(r["id"])
+            r_full = db.get_release(r["id"])
+            r_targets = None
+            if r_full and r_full.get("target_center_ids"):
+                if isinstance(r_full["target_center_ids"], str):
+                    import json as _json
+                    try:
+                        r_targets = _json.loads(r_full["target_center_ids"])
+                    except Exception:
+                        r_targets = None
+                elif isinstance(r_full["target_center_ids"], list):
+                    r_targets = r_full["target_center_ids"]
             stages = db.list_grayscale_stages(r["id"])
             active_projected = set(
-                _projected_centers_for_release(existing_grayscale_stages=stages)
+                _projected_centers_for_release(
+                    existing_grayscale_stages=stages,
+                    target_center_ids=r_targets,
+                )
             )
             overlap = list(new_projected & active_projected)
             if overlap:
@@ -243,7 +266,7 @@ def validate_release(
             )
 
     passed_window, window_violations, bypassed = check_release_windows(
-        risk_level=risk_level, target_center_ids=target_center_ids
+        risk_level=risk_level, target_center_ids=target_center_ids, now=now,
     )
     violations.extend(window_violations)
     extra["bypassed_windows"] = bypassed

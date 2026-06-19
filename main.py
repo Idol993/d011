@@ -1,9 +1,15 @@
 import argparse
 import sys
 import os
+import io
 import time
 from datetime import datetime
 from typing import Optional
+
+if hasattr(sys.stdout, 'buffer'):
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+if hasattr(sys.stderr, 'buffer'):
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -28,11 +34,15 @@ def cmd_submit(args):
     db.init_db()
     risk = "emergency" if args.emergency else "normal"
     urgent = args.urgent
+    target_centers = None
+    if getattr(args, "target_centers", None):
+        target_centers = [c.strip() for c in args.target_centers.split(",") if c.strip()]
 
-    passed, violations = governance.validate_release(
+    passed, violations, gov_extra = governance.validate_release(
         version=args.version,
         stable_version=args.stable_version,
         risk_level=risk,
+        target_center_ids=target_centers,
     )
     if not passed:
         logger.error(f"版本治理校验未通过，发布被拦截:")
@@ -41,6 +51,10 @@ def cmd_submit(args):
         notifier.notify_governance_blocked(args.version, violations)
         return
 
+    bypassed = gov_extra.get("bypassed_windows") or []
+    used_stable = gov_extra.get("used_stable")
+    latest_released = gov_extra.get("latest_released")
+
     release_id = db.insert_release(
         version=args.version,
         risk_level=risk,
@@ -48,9 +62,24 @@ def cmd_submit(args):
         submitter=args.submitter,
         stable_version=args.stable_version,
         emergency_urgent=urgent,
+        governance_bypassed=bypassed,
+        target_center_ids=target_centers,
+        governance_used_stable=used_stable,
     )
+
+    if bypassed:
+        print(f"  ⚠ 紧急发布已绕过 {len(bypassed)} 个冻结窗口（历史记录中已留痕）:")
+        for b in bypassed:
+            center_part = ""
+            if b.get("affected_centers"):
+                center_part = f", 命中中心={b['affected_centers']}"
+            print(f"    - {b['name']} {b['detail']}{center_part}: {b['reason']}")
+    print(f"  基线版本: {used_stable or '(暂无已发布基线)'} "
+          + (f"(默认取最近成功发布='{latest_released}')" if not args.stable_version and latest_released else ""))
+
     notifier.notify_release_submitted(args.version, risk, args.submitter)
-    logger.info(f"发布申请已提交: release_id={release_id}, version={args.version}, risk={risk}, urgent={urgent}")
+    logger.info(f"发布申请已提交: release_id={release_id}, version={args.version}, "
+                f"risk={risk}, urgent={urgent}, target_centers={target_centers}")
 
     if args.auto:
         logger.info("启动自动化流程: 前置检查 -> 审批 -> 灰度 -> 监控")
@@ -238,18 +267,21 @@ def cmd_report(args):
             for role, avg_s in s["per_role_avg"].items():
                 name = STAKEHOLDERS.get(role, {}).get("name", role)
                 print(f"  {name}({role}): {avg_s/60:.1f} 分钟")
+        if result.get("json"):
+            print(f"\nJSON 汇总: {result['json']}")
         if result["pdf"]:
-            print(f"\nPDF: {result['pdf']}")
+            print(f"\nPDF 报表: {result['pdf']}")
         if result["excel"]:
-            print(f"Excel: {result['excel']}")
+            print(f"Excel 报表: {result['excel']}")
     elif args.action == "list":
         reps = db.list_weekly_reports()
-        print(f"{'ID':<5} {'开始':<20} {'结束':<20} {'发布':<6} {'成功':<6} {'回滚':<6} {'审批(min)':<10}")
-        print("-" * 85)
+        print(f"{'ID':<5} {'开始':<20} {'结束':<20} {'发布':<6} {'成功':<6} {'回滚':<6} {'审批(min)':<10} JSON")
+        print("-" * 100)
         for r in reps:
+            json_exists = "✓" if r.get("json_path") else ""
             print(f"{r['id']:<5} {r['week_start']:<20} {r['week_end']:<20} "
                   f"{r['release_total']:<6} {r['release_success']:<6} "
-                  f"{r['rollback_count']:<6} {r['avg_approval_seconds']/60:<10.1f}")
+                  f"{r['rollback_count']:<6} {r['avg_approval_seconds']/60:<10.1f} {json_exists}")
 
 
 def cmd_scheduler(args):
@@ -283,15 +315,55 @@ def cmd_scheduler(args):
         status = scheduler.get_scheduler_status()
         print(f"\n=== 调度器状态 ===")
         print(f"运行中: {'是' if status['running'] else '否'}")
+        print(f"PID: {status.get('pid', 'N/A')}")
         print(f"下次周报生成: {status.get('next_report_time', 'N/A')}")
         print(f"审批超时阈值: {status.get('approval_timeouts', {})}")
+
         jobs = status.get("jobs", [])
         if jobs:
             print(f"\n已注册任务 ({len(jobs)}):")
             for j in jobs:
                 print(f"  {j['job']} | 下次执行: {j['next_run']}")
+        elif status["running"]:
+            print("\n已注册任务: 调度器运行中，使用独立线程注册")
         else:
             print("\n无已注册任务 (调度器未启动)")
+
+        last_runs = status.get("last_runs", {})
+        if last_runs:
+            label_map = {
+                "_weekly_report_job": "【周报生成】",
+                "_approval_timeout_check": "【审批超时巡检】",
+            }
+            print(f"\n=== 最近任务执行记录 (持久化，重启可见) ===")
+            for job_key, info in last_runs.items():
+                label = label_map.get(job_key, job_key)
+                st = info.get("status", "?")
+                if st == "never":
+                    print(f"{label} 从未执行")
+                    continue
+                mark = "✓" if st == "success" else ("⚠" if st == "running" else "✗")
+                print(f"{label} [{mark}] 状态={st}")
+                print(f"    开始: {info.get('started_at', '-')}")
+                print(f"    结束: {info.get('finished_at', '-')}")
+                dur = info.get("duration_seconds")
+                print(f"    耗时: {dur:.1f}s" if dur else "    耗时: -")
+                if info.get("result"):
+                    print(f"    结果: {info['result']}")
+                if info.get("error_detail"):
+                    print(f"    失败原因: {info['error_detail']}")
+
+        recent = status.get("recent_runs_sample", [])
+        if recent:
+            print(f"\n=== 近{len(recent)}次调度执行抽样 ===")
+            print(f"{'ID':<5} {'任务':<26} {'状态':<8} {'开始时间':<22} {'耗时(s)':<8} 失败原因")
+            print("-" * 95)
+            for r in recent:
+                dur = f"{r['duration_seconds']:.1f}" if r.get("duration_seconds") else "-"
+                err = r.get("error") or "-"
+                print(f"{r['id']:<5} {r['job_name']:<26} {r['status']:<8} "
+                      f"{r['started_at']:<22} {dur:<8} {err}")
+            print(f"共 {status.get('recent_runs_count', 0)} 条历史记录")
 
 
 def cmd_history(args):
@@ -327,10 +399,22 @@ def cmd_history(args):
         print(f"\n=== 版本 {r['version']} 详情 ===")
         print(f"ID: {r['id']}, 风险: {r['risk_level']}, 状态: {RELEASE_STATUS_LABELS.get(r['status'], r['status'])}")
         print(f"加急: {'是' if r.get('emergency_urgent') else '否'}, 提交者: {r['submitter']}")
-        print(f"稳定版本: {r.get('stable_version') or '-'}, 描述: {r.get('description') or '-'}")
+        print(f"稳定版本: {r.get('stable_version') or '-'}, 治理基线: {r.get('governance_used_stable') or '-'}")
+        target_centers = r.get("target_center_ids")
+        if isinstance(target_centers, list) and target_centers:
+            print(f"目标分拨中心: {target_centers}")
+        print(f"描述: {r.get('description') or '-'}")
         print(f"触发回滚: {'是' if r['rollback_triggered'] else '否'}")
         if r.get("rollback_reason"):
             print(f"回滚原因: {r['rollback_reason']}")
+        bypassed = r.get("governance_bypassed")
+        if isinstance(bypassed, list) and bypassed:
+            print(f"\n-- 发布治理: 已绕过 {len(bypassed)} 个冻结窗口 --")
+            for b in bypassed:
+                center_part = ""
+                if b.get("affected_centers"):
+                    center_part = f", 命中中心={b['affected_centers']}"
+                print(f"  {b['name']} {b.get('detail','')}{center_part}: {b.get('reason','')}")
         print(f"\n-- 前置检查 --")
         for p in detail["prechecks"]:
             mark = "✓" if p["passed"] else "✗"
@@ -392,8 +476,9 @@ def main():
     p.add_argument("--version", required=True, help="发布版本号")
     p.add_argument("--description", help="版本描述")
     p.add_argument("--submitter", required=True, help="提交人")
-    p.add_argument("--stable-version", help="上一稳定版本号")
-    p.add_argument("--emergency", action="store_true", help="紧急发布")
+    p.add_argument("--stable-version", help="上一稳定版本号(不填则默认取最近成功发布版本)")
+    p.add_argument("--target-centers", help="目标分拨中心ID列表(逗号分隔，如 DC001,DC003)")
+    p.add_argument("--emergency", action="store_true", help="紧急发布(可绕过冻结窗口)")
     p.add_argument("--urgent", action="store_true", help="加急标记(审批超时阈值缩短)")
     p.add_argument("--auto", action="store_true", help="自动执行完整流程")
     p.add_argument("--inject-anomaly", help="指定某分拨中心ID模拟异常")

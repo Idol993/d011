@@ -149,6 +149,17 @@ def init_db():
                 detail TEXT,
                 created_at TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS scheduler_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                job_name TEXT NOT NULL,
+                started_at TEXT NOT NULL,
+                finished_at TEXT,
+                status TEXT NOT NULL,
+                result TEXT,
+                error_detail TEXT,
+                duration_seconds REAL
+            );
             """
         )
         _migrate(conn)
@@ -175,24 +186,55 @@ def _migrate(conn):
         cur.execute("ALTER TABLE approvals ADD COLUMN timeout_reminded INTEGER DEFAULT 0")
         logger.info("Migrated: added approvals.timeout_reminded")
 
+    try:
+        cur.execute("SELECT governance_bypassed FROM releases LIMIT 1")
+    except sqlite3.OperationalError:
+        cur.execute("ALTER TABLE releases ADD COLUMN governance_bypassed TEXT")
+        logger.info("Migrated: added releases.governance_bypassed")
+
+    try:
+        cur.execute("SELECT target_center_ids FROM releases LIMIT 1")
+    except sqlite3.OperationalError:
+        cur.execute("ALTER TABLE releases ADD COLUMN target_center_ids TEXT")
+        logger.info("Migrated: added releases.target_center_ids")
+
+    try:
+        cur.execute("SELECT governance_used_stable FROM releases LIMIT 1")
+    except sqlite3.OperationalError:
+        cur.execute("ALTER TABLE releases ADD COLUMN governance_used_stable TEXT")
+        logger.info("Migrated: added releases.governance_used_stable")
+
+    try:
+        cur.execute("SELECT json_path FROM weekly_reports LIMIT 1")
+    except sqlite3.OperationalError:
+        cur.execute("ALTER TABLE weekly_reports ADD COLUMN json_path TEXT")
+        logger.info("Migrated: added weekly_reports.json_path")
+
 
 def insert_release(version: str, risk_level: str, description: str,
                    submitter: str, stable_version: Optional[str],
-                   emergency_urgent: bool = False) -> int:
+                   emergency_urgent: bool = False,
+                   governance_bypassed: Optional[List[Dict]] = None,
+                   target_center_ids: Optional[List[str]] = None,
+                   governance_used_stable: Optional[str] = None) -> int:
     now = datetime.now().isoformat(timespec="seconds")
     with get_conn() as conn:
         cur = conn.cursor()
+        bypassed_json = json.dumps(governance_bypassed, ensure_ascii=False) if governance_bypassed else None
+        targets_json = json.dumps(target_center_ids, ensure_ascii=False) if target_center_ids else None
         cur.execute(
             """INSERT INTO releases
                (version, risk_level, description, submitter, status,
-                stable_version, created_at, updated_at, emergency_urgent)
-               VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?)""",
+                stable_version, created_at, updated_at, emergency_urgent,
+                governance_bypassed, target_center_ids, governance_used_stable)
+               VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?)""",
             (version, risk_level, description, submitter, stable_version,
-             now, now, int(emergency_urgent)),
+             now, now, int(emergency_urgent), bypassed_json, targets_json, governance_used_stable),
         )
         release_id = cur.lastrowid
         _log(conn, "release", "create", submitter, release_id,
-             f"创建发布申请: version={version}, risk={risk_level}, urgent={emergency_urgent}")
+             f"创建发布申请: version={version}, risk={risk_level}, urgent={emergency_urgent}"
+             + (f", bypassed={len(governance_bypassed)} 个窗口" if governance_bypassed else ""))
         return release_id
 
 
@@ -685,3 +727,121 @@ def get_per_role_durations(release_id: int) -> Dict[str, Optional[float]]:
         )
         rows = cur.fetchall()
         return {r["role"]: r["duration_seconds"] for r in rows}
+
+
+def get_release(release_id: int) -> Optional[Dict]:
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM releases WHERE id=?", (release_id,))
+        row = cur.fetchone()
+        if row:
+            if row.get("governance_bypassed"):
+                try:
+                    row["governance_bypassed"] = json.loads(row["governance_bypassed"])
+                except Exception:
+                    pass
+            if row.get("target_center_ids"):
+                try:
+                    row["target_center_ids"] = json.loads(row["target_center_ids"])
+                except Exception:
+                    pass
+        return row
+
+
+def get_release_by_version(version: str) -> Optional[Dict]:
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM releases WHERE version=?", (version,))
+        row = cur.fetchone()
+        if row:
+            if row.get("governance_bypassed"):
+                try:
+                    row["governance_bypassed"] = json.loads(row["governance_bypassed"])
+                except Exception:
+                    pass
+            if row.get("target_center_ids"):
+                try:
+                    row["target_center_ids"] = json.loads(row["target_center_ids"])
+                except Exception:
+                    pass
+        return row
+
+
+def insert_scheduler_run(job_name: str, started_at: Optional[str] = None) -> int:
+    now = datetime.now().isoformat(timespec="seconds")
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            """INSERT INTO scheduler_runs
+               (job_name, started_at, status) VALUES (?, ?, 'running')""",
+            (job_name, started_at or now),
+        )
+        return cur.lastrowid
+
+
+def complete_scheduler_run(run_id: int, status: str,
+                           result: Optional[str] = None,
+                           error_detail: Optional[str] = None,
+                           finished_at: Optional[str] = None):
+    now = datetime.now().isoformat(timespec="seconds")
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT started_at FROM scheduler_runs WHERE id=?", (run_id,))
+        row = cur.fetchone()
+        duration = None
+        if row and row["started_at"]:
+            try:
+                duration = (datetime.fromisoformat(finished_at or now)
+                            - datetime.fromisoformat(row["started_at"])).total_seconds()
+            except Exception:
+                pass
+        cur.execute(
+            """UPDATE scheduler_runs
+               SET status=?, result=?, error_detail=?,
+                   finished_at=?, duration_seconds=?
+               WHERE id=?""",
+            (status, result, error_detail, finished_at or now, duration, run_id),
+        )
+        _log(conn, "scheduler", status, None, None,
+             f"run_id={run_id}, job={status}, 耗时={duration:.1f}s" if duration else f"run_id={run_id}, job={status}")
+
+
+def list_scheduler_runs(job_name: Optional[str] = None, limit: int = 20) -> List[Dict]:
+    sql = "SELECT * FROM scheduler_runs"
+    params = []
+    if job_name:
+        sql += " WHERE job_name=?"
+        params.append(job_name)
+    sql += " ORDER BY id DESC LIMIT ?"
+    params.append(limit)
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute(sql, params)
+        return cur.fetchall()
+
+
+def get_last_scheduler_run(job_name: str) -> Optional[Dict]:
+    runs = list_scheduler_runs(job_name=job_name, limit=1)
+    return runs[0] if runs else None
+
+
+def insert_weekly_report(week_start: str, week_end: str, release_total: int,
+                         release_success: int, rollback_count: int,
+                         avg_approval_seconds: float, pdf_path: Optional[str],
+                         excel_path: Optional[str],
+                         json_path: Optional[str] = None) -> int:
+    now = datetime.now().isoformat(timespec="seconds")
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            """INSERT INTO weekly_reports
+               (week_start, week_end, release_total, release_success,
+                rollback_count, avg_approval_seconds, pdf_path, excel_path, json_path, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (week_start, week_end, release_total, release_success, rollback_count,
+             avg_approval_seconds, pdf_path, excel_path, json_path, now),
+        )
+        report_id = cur.lastrowid
+        _log(conn, "report", "create", None, report_id,
+             f"周报 {week_start} ~ {week_end}")
+        return report_id

@@ -1,7 +1,9 @@
 import os
+import json
 import platform
 from datetime import datetime, timedelta
 from typing import Dict, List, Tuple, Optional
+from collections import Counter, defaultdict
 
 try:
     import matplotlib
@@ -141,6 +143,131 @@ def collect_weekly_stats(ref_date: Optional[datetime] = None) -> Dict:
     prev_success = len([r for r in prev_releases if r["status"] in SUCCESS_STATUSES and not r["rollback_triggered"]])
     prev_rollback = len([r for r in prev_releases if r["rollback_triggered"]])
 
+    risk_ranking = []
+    for risk in ["emergency", "normal"]:
+        subset = [r for r in releases if r["risk_level"] == risk]
+        total = len(subset)
+        success = len([r for r in subset if r["status"] in SUCCESS_STATUSES and not r["rollback_triggered"]])
+        rollback = len([r for r in subset if r["rollback_triggered"]])
+        failed = len([r for r in subset if r["status"] in {"precheck_failed", "rejected", "rolled_back"}])
+        risk_ranking.append({
+            "risk_level": risk,
+            "total": total,
+            "success": success,
+            "success_rate": (success / total) if total else 0.0,
+            "failed": failed,
+            "rollback_count": rollback,
+        })
+    risk_ranking.sort(key=lambda x: (-x["rollback_count"], -x["failed"]))
+
+    rollback_reasons_counter: Counter = Counter()
+    rollback_details_list = []
+    for r in releases:
+        if r["rollback_triggered"] or r["status"] == "rolled_back":
+            rbs = db.list_rollbacks(r["id"])
+            for rb in rbs:
+                reason = rb.get("reason") or r.get("rollback_reason") or "未填写原因"
+                rollback_reasons_counter[reason] += 1
+                rollback_details_list.append({
+                    "version": r["version"],
+                    "release_id": r["id"],
+                    "reason": reason,
+                    "affected_centers": rb.get("affected_centers") or [],
+                    "affected_parcels": rb.get("affected_parcels", 0),
+                    "created_at": rb.get("created_at"),
+                })
+    rollback_reason_top = [
+        {"reason": reason, "count": count}
+        for reason, count in rollback_reasons_counter.most_common(10)
+    ]
+
+    approval_timeout_top = []
+    timeout_approvals_all = []
+    from src.config import APPROVAL_TIMEOUT_MINUTES
+    for r in releases:
+        approvals = db.list_approvals(r["id"])
+        for a in approvals:
+            threshold_min = APPROVAL_TIMEOUT_MINUTES.get(r["risk_level"], 480)
+            if a.get("created_at"):
+                try:
+                    elapsed_min = None
+                    if a.get("approved_at"):
+                        elapsed_min = (datetime.fromisoformat(a["approved_at"])
+                                       - datetime.fromisoformat(a["created_at"])).total_seconds() / 60
+                    elif a["status"] == "pending":
+                        elapsed_min = (datetime.now()
+                                       - datetime.fromisoformat(a["created_at"])).total_seconds() / 60
+                    if elapsed_min and elapsed_min > threshold_min:
+                        timeout_approvals_all.append({
+                            "version": r["version"],
+                            "release_id": r["id"],
+                            "role": a["role"],
+                            "approver": a.get("approver"),
+                            "status": a["status"],
+                            "elapsed_minutes": round(elapsed_min, 1),
+                            "threshold_minutes": threshold_min,
+                            "timeout_reminded": bool(a.get("timeout_reminded", 0)),
+                        })
+                except Exception:
+                    pass
+    timeout_approvals_all.sort(key=lambda x: -x["elapsed_minutes"])
+    approval_timeout_top = timeout_approvals_all[:10]
+
+    per_center_total: defaultdict = defaultdict(int)
+    per_center_success: defaultdict = defaultdict(int)
+    per_center_rollback: defaultdict = defaultdict(int)
+    per_center_failed: defaultdict = defaultdict(int)
+    for r in releases:
+        rbs = db.list_rollbacks(r["id"])
+        rollback_centers = set()
+        for rb in rbs:
+            for c in rb.get("affected_centers", []):
+                rollback_centers.add(c)
+        stages = db.list_grayscale_stages(r["id"])
+        deployed = set()
+        for s in stages:
+            for c in s.get("center_ids", []):
+                deployed.add(c)
+        is_success = r["status"] in SUCCESS_STATUSES and not r["rollback_triggered"]
+        is_failed = r["status"] in {"precheck_failed", "rejected", "rolled_back"}
+        for c in deployed:
+            per_center_total[c] += 1
+            if is_success and c not in rollback_centers:
+                per_center_success[c] += 1
+            if c in rollback_centers:
+                per_center_rollback[c] += 1
+            if is_failed:
+                per_center_failed[c] += 1
+        if not deployed and (is_success or is_failed):
+            fallback_centers = ["DC001"]
+            for c in fallback_centers:
+                per_center_total[c] += 1
+                if is_success:
+                    per_center_success[c] += 1
+                if is_failed:
+                    per_center_failed[c] += 1
+
+    center_success_rates = []
+    all_centers = set(list(per_center_total.keys()))
+    from src.config import DISTRIBUTION_CENTERS
+    for dc in DISTRIBUTION_CENTERS:
+        all_centers.add(dc["id"])
+    for cid in sorted(all_centers):
+        total = per_center_total[cid]
+        succ = per_center_success[cid]
+        rb = per_center_rollback[cid]
+        fl = per_center_failed[cid]
+        center_success_rates.append({
+            "center_id": cid,
+            "center_name": next((c["name"] for c in DISTRIBUTION_CENTERS if c["id"] == cid), cid),
+            "release_total": total,
+            "success": succ,
+            "success_rate": (succ / total) if total else 0.0,
+            "rollback_count": rb,
+            "failed_count": fl,
+        })
+    center_success_rates.sort(key=lambda x: (-x["success_rate"] if x["release_total"] else -1, -x["release_total"]))
+
     return {
         "week_start": start_str,
         "week_end": end_str,
@@ -164,7 +291,86 @@ def collect_weekly_stats(ref_date: Optional[datetime] = None) -> Dict:
             "success_rate": (prev_success / prev_total) if prev_total else 0.0,
             "rollback_count": prev_rollback,
         },
+        "json_analytics": {
+            "generated_at": datetime.now().isoformat(timespec="seconds"),
+            "week_range": {"start": start_str, "end": end_str},
+            "risk_ranking": risk_ranking,
+            "rollback_reason_top": rollback_reason_top,
+            "rollback_details": rollback_details_list,
+            "approval_timeout_top": approval_timeout_top,
+            "center_success_rates": center_success_rates,
+            "status_distribution": [
+                {"status": k, "status_cn": RELEASE_STATUS_LABELS.get(k, k), "count": v}
+                for k, v in status_counts.items() if v > 0
+            ],
+            "risk_distribution": [
+                {"risk_level": k, "count": v} for k, v in risk_counts.items()
+            ],
+            "core_metrics": {
+                "release_total": release_total,
+                "release_success": release_success,
+                "release_success_rate": (release_success / release_total) if release_total else 0.0,
+                "release_failed": release_failed,
+                "release_in_progress": release_in_progress,
+                "rollback_count": rollback_count,
+                "avg_approval_minutes": avg_approval / 60,
+                "per_role_avg_minutes": {k: v / 60 for k, v in per_role_avg.items()},
+            },
+            "weekly_comparison": {
+                "current": {
+                    "total": release_total,
+                    "success": release_success,
+                    "success_rate": (release_success / release_total) if release_total else 0.0,
+                    "rollback_count": rollback_count,
+                },
+                "previous": {
+                    "total": prev_total,
+                    "success": prev_success,
+                    "success_rate": (prev_success / prev_total) if prev_total else 0.0,
+                    "rollback_count": prev_rollback,
+                },
+                "delta": {
+                    "total_delta": release_total - prev_total,
+                    "success_delta": release_success - prev_success,
+                    "success_rate_delta_pct": (
+                        ((release_success / release_total) if release_total else 0.0)
+                        - ((prev_success / prev_total) if prev_total else 0.0)
+                    ) * 100,
+                    "rollback_delta": rollback_count - prev_rollback,
+                },
+            },
+        },
     }
+
+
+def _make_json_summary(stats: Dict, out_path: str) -> Optional[str]:
+    try:
+        analytics = stats["json_analytics"]
+        brief_releases = []
+        for r in stats["releases"]:
+            brief_releases.append({
+                "release_id": r["id"],
+                "version": r["version"],
+                "risk_level": r["risk_level"],
+                "status": r["status"],
+                "status_cn": RELEASE_STATUS_LABELS.get(r["status"], r["status"]),
+                "submitter": r["submitter"],
+                "rollback_triggered": bool(r["rollback_triggered"]),
+                "emergency_urgent": bool(r.get("emergency_urgent", 0)),
+                "created_at": r["created_at"],
+                "updated_at": r["updated_at"],
+            })
+        output = {
+            **analytics,
+            "releases": brief_releases,
+        }
+        with open(out_path, "w", encoding="utf-8") as f:
+            json.dump(output, f, ensure_ascii=False, indent=2, default=str)
+        logger.info(f"周报 JSON 汇总已生成: {out_path}")
+        return out_path
+    except Exception as e:
+        logger.error(f"生成 JSON 汇总失败: {e}")
+        return None
 
 
 def _make_chart(stats: Dict, out_path: str) -> Optional[str]:
@@ -522,16 +728,18 @@ def generate_weekly_report(ref_date: Optional[datetime] = None) -> Dict:
     chart_path = os.path.join(REPORTS_DIR, f"weekly_chart_{tag}.png")
     pdf_path = os.path.join(REPORTS_DIR, f"weekly_report_{tag}.pdf")
     excel_path = os.path.join(REPORTS_DIR, f"weekly_report_{tag}.xlsx")
+    json_path = os.path.join(REPORTS_DIR, f"weekly_summary_{tag}.json")
 
     chart = _make_chart(stats, chart_path)
     pdf = _make_pdf(stats, chart, pdf_path)
     xls = _make_excel(stats, excel_path)
+    jsn = _make_json_summary(stats, json_path)
 
     report_id = db.insert_weekly_report(
         stats["week_start"], stats["week_end"],
         stats["release_total"], stats["release_success"],
         stats["rollback_count"], stats["avg_approval_seconds"],
-        pdf, xls,
+        pdf, xls, jsn,
     )
     if pdf and xls:
         notifier.notify_weekly_report_ready(report_id, pdf, xls)
@@ -541,5 +749,6 @@ def generate_weekly_report(ref_date: Optional[datetime] = None) -> Dict:
         "stats": stats,
         "pdf": pdf,
         "excel": xls,
+        "json": jsn,
         "chart": chart,
     }
