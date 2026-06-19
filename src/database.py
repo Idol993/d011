@@ -48,7 +48,8 @@ def init_db():
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 rollback_triggered INTEGER DEFAULT 0,
-                rollback_reason TEXT
+                rollback_reason TEXT,
+                emergency_urgent INTEGER DEFAULT 0
             );
 
             CREATE TABLE IF NOT EXISTS prechecks (
@@ -71,6 +72,8 @@ def init_db():
                 comment TEXT,
                 approved_at TEXT,
                 created_at TEXT NOT NULL,
+                duration_seconds REAL,
+                timeout_reminded INTEGER DEFAULT 0,
                 FOREIGN KEY (release_id) REFERENCES releases(id)
             );
 
@@ -148,24 +151,48 @@ def init_db():
             );
             """
         )
+        _migrate(conn)
         logger.info("Database initialized")
 
 
+def _migrate(conn):
+    cur = conn.cursor()
+    try:
+        cur.execute("SELECT emergency_urgent FROM releases LIMIT 1")
+    except sqlite3.OperationalError:
+        cur.execute("ALTER TABLE releases ADD COLUMN emergency_urgent INTEGER DEFAULT 0")
+        logger.info("Migrated: added releases.emergency_urgent")
+
+    try:
+        cur.execute("SELECT duration_seconds FROM approvals LIMIT 1")
+    except sqlite3.OperationalError:
+        cur.execute("ALTER TABLE approvals ADD COLUMN duration_seconds REAL")
+        logger.info("Migrated: added approvals.duration_seconds")
+
+    try:
+        cur.execute("SELECT timeout_reminded FROM approvals LIMIT 1")
+    except sqlite3.OperationalError:
+        cur.execute("ALTER TABLE approvals ADD COLUMN timeout_reminded INTEGER DEFAULT 0")
+        logger.info("Migrated: added approvals.timeout_reminded")
+
+
 def insert_release(version: str, risk_level: str, description: str,
-                   submitter: str, stable_version: Optional[str]) -> int:
+                   submitter: str, stable_version: Optional[str],
+                   emergency_urgent: bool = False) -> int:
     now = datetime.now().isoformat(timespec="seconds")
     with get_conn() as conn:
         cur = conn.cursor()
         cur.execute(
             """INSERT INTO releases
                (version, risk_level, description, submitter, status,
-                stable_version, created_at, updated_at)
-               VALUES (?, ?, ?, ?, 'pending', ?, ?, ?)""",
-            (version, risk_level, description, submitter, stable_version, now, now),
+                stable_version, created_at, updated_at, emergency_urgent)
+               VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?)""",
+            (version, risk_level, description, submitter, stable_version,
+             now, now, int(emergency_urgent)),
         )
         release_id = cur.lastrowid
         _log(conn, "release", "create", submitter, release_id,
-             f"创建发布申请: version={version}, risk={risk_level}")
+             f"创建发布申请: version={version}, risk={risk_level}, urgent={emergency_urgent}")
         return release_id
 
 
@@ -198,6 +225,32 @@ def get_release_by_version(version: str) -> Optional[Dict]:
         cur = conn.cursor()
         cur.execute("SELECT * FROM releases WHERE version=?", (version,))
         return cur.fetchone()
+
+
+def get_latest_released_version() -> Optional[str]:
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT version FROM releases WHERE status='released' AND rollback_triggered=0 "
+            "ORDER BY id DESC LIMIT 1"
+        )
+        row = cur.fetchone()
+        return row["version"] if row else None
+
+
+def get_active_releases_for_centers() -> List[Dict]:
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT r.id, r.version, r.status, r.risk_level, gs.center_ids "
+            "FROM releases r "
+            "LEFT JOIN grayscale_stages gs ON r.id = gs.release_id AND gs.status = 'running' "
+            "WHERE r.status IN ('awaiting_approval', 'approved', 'grayscale')"
+        )
+        rows = cur.fetchall()
+        for r in rows:
+            r["center_ids"] = json.loads(r["center_ids"]) if r["center_ids"] else []
+        return rows
 
 
 def list_releases(filters: Optional[Dict] = None) -> List[Dict]:
@@ -248,34 +301,43 @@ def list_prechecks(release_id: int) -> List[Dict]:
         return cur.fetchall()
 
 
-def insert_approvals(release_id: int, roles: List[str]):
+def insert_approvals(release_id: int, roles: List[str], emergency_urgent: bool = False):
     now = datetime.now().isoformat(timespec="seconds")
     with get_conn() as conn:
         cur = conn.cursor()
         for role in roles:
             cur.execute(
                 """INSERT INTO approvals
-                   (release_id, role, status, created_at)
-                   VALUES (?, ?, 'pending', ?)""",
+                   (release_id, role, status, created_at, timeout_reminded)
+                   VALUES (?, ?, 'pending', ?, 0)""",
                 (release_id, role, now),
             )
         _log(conn, "approval", "init", None, release_id,
-             f"初始化审批流程: roles={roles}")
+             f"初始化审批流程: roles={roles}, urgent={emergency_urgent}")
 
 
 def approve(approval_id: int, approver: str, comment: str) -> bool:
     now = datetime.now().isoformat(timespec="seconds")
     with get_conn() as conn:
         cur = conn.cursor()
+        cur.execute("SELECT created_at FROM approvals WHERE id=? AND status='pending'", (approval_id,))
+        row = cur.fetchone()
+        duration = None
+        if row and row["created_at"]:
+            try:
+                duration = (datetime.fromisoformat(now) - datetime.fromisoformat(row["created_at"])).total_seconds()
+            except Exception:
+                pass
         cur.execute(
-            "UPDATE approvals SET status='approved', approver=?, comment=?, approved_at=? WHERE id=? AND status='pending'",
-            (approver, comment, now, approval_id),
+            "UPDATE approvals SET status='approved', approver=?, comment=?, approved_at=?, duration_seconds=? "
+            "WHERE id=? AND status='pending'",
+            (approver, comment, now, duration, approval_id),
         )
         if cur.rowcount > 0:
             cur.execute("SELECT release_id FROM approvals WHERE id=?", (approval_id,))
-            row = cur.fetchone()
-            _log(conn, "approval", "approve", approver, row["release_id"],
-                 f"审批ID={approval_id}, 通过")
+            r2 = cur.fetchone()
+            _log(conn, "approval", "approve", approver, r2["release_id"],
+                 f"审批ID={approval_id}, 通过, 耗时={duration:.0f}s" if duration else f"审批ID={approval_id}, 通过")
             return True
         return False
 
@@ -284,14 +346,23 @@ def reject(approval_id: int, approver: str, comment: str) -> bool:
     now = datetime.now().isoformat(timespec="seconds")
     with get_conn() as conn:
         cur = conn.cursor()
+        cur.execute("SELECT created_at FROM approvals WHERE id=? AND status='pending'", (approval_id,))
+        row = cur.fetchone()
+        duration = None
+        if row and row["created_at"]:
+            try:
+                duration = (datetime.fromisoformat(now) - datetime.fromisoformat(row["created_at"])).total_seconds()
+            except Exception:
+                pass
         cur.execute(
-            "UPDATE approvals SET status='rejected', approver=?, comment=?, approved_at=? WHERE id=? AND status='pending'",
-            (approver, comment, now, approval_id),
+            "UPDATE approvals SET status='rejected', approver=?, comment=?, approved_at=?, duration_seconds=? "
+            "WHERE id=? AND status='pending'",
+            (approver, comment, now, duration, approval_id),
         )
         if cur.rowcount > 0:
             cur.execute("SELECT release_id FROM approvals WHERE id=?", (approval_id,))
-            row = cur.fetchone()
-            _log(conn, "approval", "reject", approver, row["release_id"],
+            r2 = cur.fetchone()
+            _log(conn, "approval", "reject", approver, r2["release_id"],
                  f"审批ID={approval_id}, 拒绝")
             return True
         return False
@@ -322,6 +393,34 @@ def get_pending_approval(release_id: int) -> Optional[Dict]:
             (release_id,),
         )
         return cur.fetchone()
+
+
+def get_timed_out_approvals(timeout_minutes: int) -> List[Dict]:
+    now_iso = datetime.now().isoformat(timespec="seconds")
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            """SELECT a.*, r.version, r.risk_level
+               FROM approvals a
+               JOIN releases r ON a.release_id = r.id
+               WHERE a.status = 'pending'
+               AND a.timeout_reminded = 0
+               AND julianday(?) - julianday(a.created_at) > ? / 1440.0
+               ORDER BY a.id""",
+            (now_iso, timeout_minutes),
+        )
+        return cur.fetchall()
+
+
+def mark_timeout_reminded(approval_id: int):
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "UPDATE approvals SET timeout_reminded=1 WHERE id=?",
+            (approval_id,),
+        )
+        _log(conn, "approval", "timeout_remind", None, None,
+             f"审批ID={approval_id} 超时提醒已发送")
 
 
 def insert_grayscale_stage(release_id: int, stage_name: str, center_ids: List[str]) -> int:
@@ -575,3 +674,14 @@ def get_approval_duration_seconds(release_id: int) -> Optional[float]:
             except Exception:
                 return None
         return None
+
+
+def get_per_role_durations(release_id: int) -> Dict[str, Optional[float]]:
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT role, duration_seconds FROM approvals WHERE release_id=? AND status='approved'",
+            (release_id,),
+        )
+        rows = cur.fetchall()
+        return {r["role"]: r["duration_seconds"] for r in rows}

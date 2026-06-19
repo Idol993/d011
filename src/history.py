@@ -10,7 +10,7 @@ try:
 except Exception:
     Workbook = None
 
-from .config import REPORTS_DIR, DISTRIBUTION_CENTERS
+from .config import REPORTS_DIR, DISTRIBUTION_CENTERS, RELEASE_STATUS_LABELS, STAKEHOLDERS
 from .logger import get_logger
 from . import database as db
 
@@ -55,12 +55,18 @@ def _build_detail(release: Dict) -> Dict:
     approvals = db.list_approvals(release["id"])
     stages = db.list_grayscale_stages(release["id"])
     rollbacks = db.list_rollbacks(release["id"])
+    role_durations = db.get_per_role_durations(release["id"])
+    for a in approvals:
+        dur = a.get("duration_seconds")
+        a["duration_str"] = f"{dur:.0f}s ({dur/60:.1f}min)" if dur else "-"
+        a["timeout_reminded"] = bool(a.get("timeout_reminded", 0))
     return {
         "release": release,
         "prechecks": prechecks,
         "approvals": approvals,
         "grayscale_stages": stages,
         "rollbacks": rollbacks,
+        "role_durations": role_durations,
     }
 
 
@@ -93,22 +99,24 @@ def export_releases(releases: List[Dict], fmt: str = "excel",
         for r in releases:
             full_data.append(_build_detail(r))
         with open(path, "w", encoding="utf-8") as f:
-            json.dump(full_data, f, ensure_ascii=False, indent=2)
+            json.dump(full_data, f, ensure_ascii=False, indent=2, default=str)
         logger.info(f"已导出 JSON: {path}")
         return path
 
     if fmt == "csv":
         path = os.path.join(REPORTS_DIR, f"{filename_prefix}_{tag}.csv")
         headers = ["ID", "版本号", "风险级别", "状态", "提交人", "描述",
-                   "稳定版本", "是否回滚", "回滚原因", "创建时间", "更新时间"]
+                   "稳定版本", "是否加急", "是否回滚", "回滚原因", "创建时间", "更新时间"]
         with open(path, "w", encoding="utf-8-sig", newline="") as f:
             w = csv.writer(f)
             w.writerow(headers)
             for r in releases:
                 w.writerow([
-                    r["id"], r["version"], r["risk_level"], r["status"],
+                    r["id"], r["version"], r["risk_level"],
+                    RELEASE_STATUS_LABELS.get(r["status"], r["status"]),
                     r["submitter"], r.get("description") or "",
                     r.get("stable_version") or "",
+                    "是" if r.get("emergency_urgent") else "否",
                     "是" if r["rollback_triggered"] else "否",
                     r.get("rollback_reason") or "",
                     r["created_at"], r["updated_at"],
@@ -126,7 +134,7 @@ def export_releases(releases: List[Dict], fmt: str = "excel",
         ws = wb.active
         ws.title = "发布记录"
         headers = ["ID", "版本号", "风险级别", "状态", "提交人", "描述",
-                   "稳定版本", "是否回滚", "回滚原因", "创建时间", "更新时间"]
+                   "稳定版本", "是否加急", "是否回滚", "回滚原因", "创建时间", "更新时间"]
         ws.append(headers)
         hf = Font(bold=True, color="FFFFFF")
         hfill = PatternFill("solid", fgColor="4C72B0")
@@ -137,31 +145,41 @@ def export_releases(releases: List[Dict], fmt: str = "excel",
             c.alignment = center
         for r in releases:
             ws.append([
-                r["id"], r["version"], r["risk_level"], r["status"],
+                r["id"], r["version"], r["risk_level"],
+                RELEASE_STATUS_LABELS.get(r["status"], r["status"]),
                 r["submitter"], r.get("description") or "",
                 r.get("stable_version") or "",
+                "是" if r.get("emergency_urgent") else "否",
                 "是" if r["rollback_triggered"] else "否",
                 r.get("rollback_reason") or "",
                 r["created_at"], r["updated_at"],
             ])
-        widths = [6, 18, 12, 16, 12, 30, 15, 10, 30, 22, 22]
+        widths = [6, 18, 12, 16, 12, 30, 15, 10, 10, 30, 22, 22]
         for i, w_ in enumerate(widths, start=1):
             ws.column_dimensions[chr(64 + i)].width = w_
 
         ws2 = wb.create_sheet("审批记录")
-        ws2.append(["发布ID", "版本", "角色", "状态", "审批人", "审批意见", "审批时间"])
+        ws2.append(["发布ID", "版本", "角色", "审批人", "状态", "审批意见",
+                    "耗时", "超时已提醒", "审批时间", "创建时间"])
         for c in ws2[1]:
             c.font = hf
             c.fill = hfill
             c.alignment = center
         for r in releases:
             for a in db.list_approvals(r["id"]):
+                dur = a.get("duration_seconds")
+                dur_str = f"{dur/60:.1f}min" if dur else "-"
                 ws2.append([
-                    r["id"], r["version"], a["role"], a["status"],
-                    a.get("approver") or "", a.get("comment") or "",
+                    r["id"], r["version"], a["role"],
+                    a.get("approver") or "",
+                    a["status"],
+                    a.get("comment") or "",
+                    dur_str,
+                    "是" if a.get("timeout_reminded") else "否",
                     a.get("approved_at") or "",
+                    a.get("created_at") or "",
                 ])
-        for i, w_ in enumerate([10, 18, 14, 12, 14, 30, 22], start=1):
+        for i, w_ in enumerate([10, 18, 14, 14, 12, 30, 14, 12, 22, 22], start=1):
             ws2.column_dimensions[chr(64 + i)].width = w_
 
         ws3 = wb.create_sheet("回滚记录")

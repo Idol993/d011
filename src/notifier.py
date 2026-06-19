@@ -45,11 +45,28 @@ def notify_precheck_result(version: str, passed: bool, details: str):
         notify_stakeholders(["hub_manager"], subject, message)
 
 
-def notify_approval_pending(version: str, role: str):
+def notify_approval_pending(version: str, role: str, emergency_urgent: bool = False):
     info = STAKEHOLDERS.get(role, {})
-    subject = f"【待审批】版本 {version} 等待您的审批"
+    urgent_tag = "【加急】" if emergency_urgent else ""
+    subject = f"{urgent_tag}【待审批】版本 {version} 等待您的审批"
     message = f"版本 {version} 已进入审批流程，请 {info.get('name', role)} 及时处理。"
+    if emergency_urgent:
+        message += "\n此为紧急发布加急审批，请优先处理！"
     notify_stakeholders([role], subject, message)
+
+
+def notify_approval_timeout(version: str, role: str, elapsed_min: float, threshold_min: int):
+    info = STAKEHOLDERS.get(role, {})
+    subject = f"【审批超时提醒】版本 {version} {info.get('name', role)}({role}) 审批已超时"
+    message = (
+        f"版本 {version} 的审批已超时！\n"
+        f"审批角色: {info.get('name', role)}({role})\n"
+        f"已等待: {elapsed_min:.0f} 分钟\n"
+        f"超时阈值: {threshold_min} 分钟\n"
+        f"请尽快处理！"
+    )
+    notify_stakeholders([role], subject, message)
+    notify_stakeholders(["hub_manager"], subject, message)
 
 
 def notify_approval_result(version: str, passed: bool, approver: str):
@@ -109,3 +126,9 @@ def notify_weekly_report_ready(report_id: int, pdf_path: str, excel_path: str):
     subject = f"【周报】发布与回滚统计周报 #{report_id} 已生成"
     message = f"周报已生成，附件:\nPDF: {pdf_path}\nExcel: {excel_path}"
     notify_stakeholders([], subject, message, include_all=True)
+
+
+def notify_governance_blocked(version: str, violations: List[str]):
+    subject = f"【发布拦截】版本 {version} 版本治理校验未通过"
+    message = f"版本 {version} 被版本治理规则拦截:\n" + "\n".join(f"  {v}" for v in violations)
+    notify_stakeholders(["tech_lead", "hub_manager"], subject, message)

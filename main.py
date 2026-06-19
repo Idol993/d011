@@ -17,7 +17,9 @@ from src import drill
 from src import report
 from src import history
 from src import notifier
-from src.config import DISTRIBUTION_CENTERS
+from src import governance
+from src import scheduler
+from src.config import DISTRIBUTION_CENTERS, RELEASE_STATUS_LABELS, SCHEDULER_PID_PATH
 
 logger = get_logger("main")
 
@@ -25,15 +27,30 @@ logger = get_logger("main")
 def cmd_submit(args):
     db.init_db()
     risk = "emergency" if args.emergency else "normal"
+    urgent = args.urgent
+
+    passed, violations = governance.validate_release(
+        version=args.version,
+        stable_version=args.stable_version,
+        risk_level=risk,
+    )
+    if not passed:
+        logger.error(f"版本治理校验未通过，发布被拦截:")
+        for v in violations:
+            print(f"  ✗ {v}")
+        notifier.notify_governance_blocked(args.version, violations)
+        return
+
     release_id = db.insert_release(
         version=args.version,
         risk_level=risk,
         description=args.description or "",
         submitter=args.submitter,
         stable_version=args.stable_version,
+        emergency_urgent=urgent,
     )
     notifier.notify_release_submitted(args.version, risk, args.submitter)
-    logger.info(f"发布申请已提交: release_id={release_id}, version={args.version}, risk={risk}")
+    logger.info(f"发布申请已提交: release_id={release_id}, version={args.version}, risk={risk}, urgent={urgent}")
 
     if args.auto:
         logger.info("启动自动化流程: 前置检查 -> 审批 -> 灰度 -> 监控")
@@ -42,7 +59,7 @@ def cmd_submit(args):
             logger.error("前置检查未通过，流程终止")
             return
 
-        approval.init_approval_flow(release_id)
+        approval.init_approval_flow(release_id, emergency_urgent=urgent)
         roles = ["tech_lead", "ops_lead", "hub_manager"] if risk == "normal" else ["tech_lead", "hub_manager"]
         for role in roles:
             approver = {"tech_lead": "auto_tech", "ops_lead": "auto_ops", "hub_manager": "auto_mgr"}[role]
@@ -56,7 +73,7 @@ def cmd_submit(args):
             stage = grayscale.start_next_stage(release_id)
             if not stage:
                 break
-            logger.info(f"等待灰度阶段 {stage['stage_name']} 观察期 {stage['wait_hours']} 小时(模拟1秒)...")
+            logger.info(f"等待灰度阶段 {stage['stage_name']} 观察期(模拟1秒)...")
             time.sleep(1.0)
             sample = monitor.sample_release_once(release_id, inject_anomaly_center=args.inject_anomaly)
             if sample.get("anomalies"):
@@ -80,7 +97,7 @@ def cmd_precheck(args):
 def cmd_approval(args):
     db.init_db()
     if args.action == "init":
-        roles = approval.init_approval_flow(args.release_id)
+        roles = approval.init_approval_flow(args.release_id, emergency_urgent=args.urgent)
         print(f"已初始化审批流程: {roles}")
     elif args.action == "approve":
         ok, msg = approval.do_approve(args.release_id, args.role, args.approver, args.comment or "")
@@ -90,11 +107,17 @@ def cmd_approval(args):
         print(f"{'成功' if ok else '失败'}: {msg}")
     elif args.action == "status":
         status = approval.get_approval_status(args.release_id)
-        print(f"\n=== 版本 {status['release']['version']} 审批状态 ===")
+        r = status["release"]
+        print(f"\n=== 版本 {r['version']} 审批状态 ===")
+        print(f"风险级别: {r['risk_level']}, 加急: {'是' if status['emergency_urgent'] else '否'}")
+        print(f"超时阈值: {status['timeout_threshold_min']}分钟")
         for a in status["approvals"]:
             mark = {"approved": "✓", "rejected": "✗", "pending": " "}[a["status"]]
-            extra = f" - {a['approver']} @ {a['approved_at']}" if a['approver'] else ""
-            print(f"  [{mark}] {a['role_name']}({a['role']}): {a['status']}{extra}")
+            timeout_flag = " ⚠超时" if a["is_timeout"] else ""
+            reminded_flag = " [已提醒]" if a["timeout_reminded"] else ""
+            wait_info = f" ({a['timeout_str']})" if a["timeout_str"] else ""
+            dur_info = f" 耗时:{a['duration_str']}" if a["duration_str"] != "-" else ""
+            print(f"  [{mark}] {a['role_name']}({a['role']}): {a['status']}{dur_info}{timeout_flag}{reminded_flag}{wait_info}")
         print(f"当前待审批: {status['pending_role'] or '无'}")
         print(f"全部通过: {status['all_approved']}")
 
@@ -150,7 +173,6 @@ def cmd_monitor(args):
             if args.auto_rollback:
                 monitor.trigger_rollback(args.release_id, result["anomalies"])
     elif args.action == "rollback":
-        release = db.get_release(args.release_id)
         sample = monitor.sample_release_once(args.release_id, inject_anomaly_center=args.inject_anomaly)
         anomalies = sample.get("anomalies", [])
         if not anomalies:
@@ -177,9 +199,6 @@ def cmd_drill(args):
         print("步骤:")
         for s in plan["steps"]:
             print(f"  {s['step']}. {s['action']}")
-        print("检查项:")
-        for c in plan["checklist"]:
-            print(f"  - {c}")
     elif args.action == "run":
         result = drill.run_drill(args.drill_id, simulated=not args.real)
         print(f"\n{result['result']}")
@@ -196,26 +215,83 @@ def cmd_report(args):
     db.init_db()
     if args.action == "generate":
         result = report.generate_weekly_report()
-        print(f"\n=== 周报 #{result['report_id']} ===")
         s = result["stats"]
+        pw = s["prev_week"]
+        print(f"\n=== 周报 #{result['report_id']} ===")
         print(f"周期: {s['week_start']} ~ {s['week_end']}")
-        print(f"发布总数: {s['release_total']}, 成功: {s['release_success']}, "
-              f"成功率: {s['release_success_rate']*100:.2f}%")
-        print(f"回滚次数: {s['rollback_count']}")
+        print(f"发布总数: {s['release_total']} (上周{pw['total']})")
+        print(f"成功发布: {s['release_success']} (上周{pw['success']})")
+        print(f"成功率: {s['release_success_rate']*100:.2f}% (上周{pw['success_rate']*100:.2f}%)")
+        print(f"回滚次数: {s['rollback_count']} (上周{pw['rollback_count']})")
+        print(f"失败/驳回: {s['release_failed']}, 进行中: {s['release_in_progress']}")
         print(f"平均审批时长: {s['avg_approval_seconds']/60:.2f} 分钟")
+        print(f"\n-- 各状态 --")
+        for status, count in s["status_counts"].items():
+            if count > 0:
+                print(f"  {RELEASE_STATUS_LABELS.get(status, status)}: {count}")
+        print(f"\n-- 风险级别 --")
+        for risk, count in s["risk_counts"].items():
+            print(f"  {risk}: {count}")
+        if s["per_role_avg"]:
+            print(f"\n-- 各角色审批耗时 --")
+            from src.config import STAKEHOLDERS
+            for role, avg_s in s["per_role_avg"].items():
+                name = STAKEHOLDERS.get(role, {}).get("name", role)
+                print(f"  {name}({role}): {avg_s/60:.1f} 分钟")
         if result["pdf"]:
-            print(f"PDF: {result['pdf']}")
+            print(f"\nPDF: {result['pdf']}")
         if result["excel"]:
             print(f"Excel: {result['excel']}")
     elif args.action == "list":
-        reports = db.list_weekly_reports()
-        print(f"{'ID':<5} {'开始':<20} {'结束':<20} {'发布数':<8} {'成功数':<8} "
-              f"{'回滚数':<8} {'平均审批(min)':<15}")
-        print("-" * 90)
-        for r in reports:
+        reps = db.list_weekly_reports()
+        print(f"{'ID':<5} {'开始':<20} {'结束':<20} {'发布':<6} {'成功':<6} {'回滚':<6} {'审批(min)':<10}")
+        print("-" * 85)
+        for r in reps:
             print(f"{r['id']:<5} {r['week_start']:<20} {r['week_end']:<20} "
-                  f"{r['release_total']:<8} {r['release_success']:<8} "
-                  f"{r['rollback_count']:<8} {r['avg_approval_seconds']/60:<15.2f}")
+                  f"{r['release_total']:<6} {r['release_success']:<6} "
+                  f"{r['rollback_count']:<6} {r['avg_approval_seconds']/60:<10.1f}")
+
+
+def cmd_scheduler(args):
+    db.init_db()
+    if args.action == "start":
+        if scheduler.is_scheduler_running():
+            print("调度器已在运行中")
+            status = scheduler.get_scheduler_status()
+            print(f"  PID: {status.get('pid', 'N/A')}")
+            print(f"  下次周报生成: {status.get('next_report_time', 'N/A')}")
+            return
+        result = scheduler.start_scheduler(block=args.foreground)
+        if args.foreground:
+            return
+        if result is not None:
+            status = scheduler.get_scheduler_status()
+            print("调度器已启动(后台)")
+            print(f"  PID: {status.get('pid', 'N/A')}")
+            print(f"  PID文件: {SCHEDULER_PID_PATH}")
+            print(f"  下次周报生成: {status.get('next_report_time', 'N/A')}")
+            print(f"  审批超时阈值: {status.get('approval_timeouts', {})}")
+        else:
+            print("调度器启动失败")
+    elif args.action == "stop":
+        if not scheduler.is_scheduler_running():
+            print("调度器未在运行")
+            return
+        scheduler.stop_scheduler()
+        print("调度器已停止")
+    elif args.action == "status":
+        status = scheduler.get_scheduler_status()
+        print(f"\n=== 调度器状态 ===")
+        print(f"运行中: {'是' if status['running'] else '否'}")
+        print(f"下次周报生成: {status.get('next_report_time', 'N/A')}")
+        print(f"审批超时阈值: {status.get('approval_timeouts', {})}")
+        jobs = status.get("jobs", [])
+        if jobs:
+            print(f"\n已注册任务 ({len(jobs)}):")
+            for j in jobs:
+                print(f"  {j['job']} | 下次执行: {j['next_run']}")
+        else:
+            print("\n无已注册任务 (调度器未启动)")
 
 
 def cmd_history(args):
@@ -230,13 +306,15 @@ def cmd_history(args):
             center_id=args.center,
         )
         print(f"\n共找到 {len(results)} 条记录:\n")
-        print(f"{'ID':<5} {'版本':<15} {'风险':<10} {'状态':<16} {'提交者':<10} "
-              f"{'回滚':<6} {'创建时间':<20}")
+        print(f"{'ID':<5} {'版本':<15} {'风险':<10} {'状态':<14} {'加急':<5} "
+              f"{'回滚':<5} {'提交者':<10} {'创建时间':<20}")
         print("-" * 90)
         for r in results:
             print(f"{r['id']:<5} {r['version']:<15} {r['risk_level']:<10} "
-                  f"{r['status']:<16} {r['submitter']:<10} "
-                  f"{'是' if r['rollback_triggered'] else '否':<6} {r['created_at']:<20}")
+                  f"{RELEASE_STATUS_LABELS.get(r['status'], r['status']):<14} "
+                  f"{'是' if r.get('emergency_urgent') else '否':<5} "
+                  f"{'是' if r['rollback_triggered'] else '否':<5} "
+                  f"{r['submitter']:<10} {r['created_at']:<20}")
     elif args.action == "detail":
         if args.version:
             detail = history.get_release_detail_by_version(args.version)
@@ -247,9 +325,9 @@ def cmd_history(args):
             return
         r = detail["release"]
         print(f"\n=== 版本 {r['version']} 详情 ===")
-        print(f"ID: {r['id']}, 风险: {r['risk_level']}, 状态: {r['status']}")
-        print(f"提交者: {r['submitter']}, 稳定版本: {r.get('stable_version') or '-'}")
-        print(f"描述: {r.get('description') or '-'}")
+        print(f"ID: {r['id']}, 风险: {r['risk_level']}, 状态: {RELEASE_STATUS_LABELS.get(r['status'], r['status'])}")
+        print(f"加急: {'是' if r.get('emergency_urgent') else '否'}, 提交者: {r['submitter']}")
+        print(f"稳定版本: {r.get('stable_version') or '-'}, 描述: {r.get('description') or '-'}")
         print(f"触发回滚: {'是' if r['rollback_triggered'] else '否'}")
         if r.get("rollback_reason"):
             print(f"回滚原因: {r['rollback_reason']}")
@@ -259,8 +337,10 @@ def cmd_history(args):
             print(f"  [{mark}] {p['check_type']}: {p['result']} - {p['detail']}")
         print(f"\n-- 审批记录 --")
         for a in detail["approvals"]:
+            dur_str = a.get("duration_str", "-")
+            reminded = " [已超时提醒]" if a.get("timeout_reminded") else ""
             print(f"  [{a['status']}] {a['role']}: {a.get('approver') or '-'} "
-                  f"@ {a.get('approved_at') or '-'} | {a.get('comment') or ''}")
+                  f"耗时:{dur_str}{reminded} | {a.get('comment') or ''}")
         print(f"\n-- 灰度阶段 --")
         for s in detail["grayscale_stages"]:
             print(f"  [{s['status']}] {s['stage_name']}: {s['center_ids']} "
@@ -284,14 +364,24 @@ def cmd_history(args):
 def cmd_logs(args):
     db.init_db()
     logs = db.list_operation_logs(limit=args.limit)
-    print(f"{'时间':<20} {'模块':<10} {'动作':<12} {'操作者':<10} {'目标ID':<8} 详情")
+    print(f"{'时间':<20} {'模块':<10} {'动作':<14} {'操作者':<10} {'目标ID':<8} 详情")
     print("-" * 110)
     for l in logs:
-        print(f"{l['created_at']:<20} {l['module']:<10} {l['action']:<12} "
+        print(f"{l['created_at']:<20} {l['module']:<10} {l['action']:<14} "
               f"{l.get('operator') or '-':<10} {l.get('target_id') or '-':<8} {l.get('detail') or ''}")
 
 
+def cmd_scheduler_worker(args):
+    db.init_db()
+    scheduler._run_foreground_loop()
+
+
 def main():
+    if len(sys.argv) > 1 and sys.argv[1] == "_scheduler_worker":
+        db.init_db()
+        scheduler._run_foreground_loop()
+        return
+
     parser = argparse.ArgumentParser(
         prog="hub_release",
         description="快递快运分拨系统 - 版本发布与智能回滚自动化管理",
@@ -304,8 +394,9 @@ def main():
     p.add_argument("--submitter", required=True, help="提交人")
     p.add_argument("--stable-version", help="上一稳定版本号")
     p.add_argument("--emergency", action="store_true", help="紧急发布")
-    p.add_argument("--auto", action="store_true", help="自动执行完整流程(检查→审批→灰度→监控)")
-    p.add_argument("--inject-anomaly", help="指定某分拨中心ID模拟异常(用于演示回滚)")
+    p.add_argument("--urgent", action="store_true", help="加急标记(审批超时阈值缩短)")
+    p.add_argument("--auto", action="store_true", help="自动执行完整流程")
+    p.add_argument("--inject-anomaly", help="指定某分拨中心ID模拟异常")
     p.set_defaults(func=cmd_submit)
 
     p = sub.add_parser("precheck", help="执行前置条件检查")
@@ -318,6 +409,7 @@ def main():
     p.add_argument("--role", choices=["tech_lead", "ops_lead", "hub_manager"])
     p.add_argument("--approver", help="审批人姓名")
     p.add_argument("--comment", help="审批意见")
+    p.add_argument("--urgent", action="store_true", help="加急审批")
     p.set_defaults(func=cmd_approval)
 
     p = sub.add_parser("grayscale", help="灰度发布管理")
@@ -343,6 +435,11 @@ def main():
     p = sub.add_parser("report", help="周报统计报表")
     p.add_argument("action", choices=["generate", "list"])
     p.set_defaults(func=cmd_report)
+
+    p = sub.add_parser("scheduler", help="后台调度管理")
+    p.add_argument("action", choices=["start", "stop", "status"])
+    p.add_argument("--foreground", action="store_true", help="前台运行(阻塞)")
+    p.set_defaults(func=cmd_scheduler)
 
     p = sub.add_parser("history", help="历史记录查询与导出")
     p.add_argument("action", choices=["search", "detail", "export"])
